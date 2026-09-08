@@ -1,0 +1,71 @@
+name: hawkeye
+description: HawkEye 监控工具——启动守护进程、查看状态、管理 watches、部署到 VPS
+
+commands:
+  start:
+    description: 启动 HawkEye 守护进程（前台，日志实时输出）
+    command: python -m hawkeye
+
+  start-detached:
+    description: 后台启动守护进程（nohup）
+    command: nohup python -m hawkeye > hawkeye.log 2>&1 &
+
+  status:
+    description: 查看当前已监控条目与最近告警
+    command: cat state.json | python3 -m json.tool
+
+  add-watch:
+    description: 交互式手工添加一个新的 [[watches]] 条目（需手工重启守护进程生效）
+    command: python3 -c "
+import tomllib
+from pathlib import Path
+import uuid, datetime
+
+config = tomllib.load(open('config.toml', 'rb'))
+watches = config.get('watches', [])
+print(f'当前 {len(watches)} 个 watches:')
+for w in watches:
+    print(f'  - {w[\"name\"]} | keywords={w[\"keywords\"]} | url={w[\"url\"]}')
+print()
+name = input('监控名称: ').strip()
+url = input('列表页 URL: ').strip()
+link_selector = input('链接选择器 (XPath): ').strip()
+keywords_raw = input('关键字 (逗号分隔): ').strip()
+keywords = [k.strip() for k in keywords_raw.split(',') if k.strip()]
+id_pattern = input('ID 正则 (可选，回车跳过): ').strip()
+"
+
+  analyze-forum:
+    description: "分析任意论坛/产品 URL，自动生成 [[watches]] 配置并追加到 config.toml。用法：python3 .claude/skills/analyze_url.py <url>"
+    command: python3 .claude/skills/analyze_url.py
+
+  state:
+    description: 打印状态文件摘要
+    command: python3 -c "
+import json, sys
+d = json.load(open('state.json'))
+print('=== 已见帖子 ===')
+seen = d.get('seen_ids', {})
+for watch, ids in seen.items():
+    print(f'  {watch}: {len(ids)} 条')
+print('=== 最近告警 ===')
+alerts = d.get('recent_alerts', [])
+for a in alerts[-10:]:
+    print(f'  [{a.get(\"time\",\"?\")}] {a.get(\"source\",\"?\")} / {a.get(\"name\",\"?\")}')
+"
+
+  package:
+    description: 打包部署包
+    command: python -m hawkeye package
+
+  deploy:
+    description: 交互式部署到 VPS
+    command: python -m hawkeye deploy
+
+  log:
+    description: 实时查看日志
+    command: tail -f hawkeye.log
+
+  recent-log:
+    description: 最近 50 行日志
+    command: tail -50 hawkeye.log

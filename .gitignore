@@ -1,0 +1,37 @@
+# 密钥与运行时状态（不入库）
+config.toml
+config.toml.bak.*
+# config.toml.tmp 含明文 token，由 configedit.py 写出；与打包的泄漏兜底同源。
+config.toml.tmp
+state.json
+state.json.tmp
+state.json.corrupt.*
+# .hawkeye-deploy.toml 是 hawkeye deploy 写出的连接参数文件（不含密码），
+# 与打包的泄漏兜底同源（A6）。
+.hawkeye-deploy.toml
+
+# Python 缓存与构建产物
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.eggs/
+
+# 虚拟环境
+.venv/
+venv/
+env/
+
+# 工具缓存
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+
+# IDE
+.idea/
+*.iml
+.vscode/
+
+# macOS
+.DS_Store

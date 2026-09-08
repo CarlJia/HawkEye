@@ -1,0 +1,58 @@
+[project]
+name = "hawkeye"
+version = "0.1.0"
+description = "网页元素变更监控通知（Telegram），基于 Python + Playwright 无头浏览器"
+requires-python = ">=3.11"
+dependencies = [
+    "playwright>=1.40",
+    "httpx>=0.27",
+    "tomli-w>=1.0",
+    # 反 bot 检测,两层各补一面:
+    #   playwright-stealth:JS 层指纹补丁(navigator.webdriver / UA Brands / chrome.runtime /
+    #     plugins / WebGL)。bundled headless Chromium 装好即可过绝大多数 CF IUAM。
+    #   channel="chrome" (BrowserManager.start 内):HTTP / Client Hints 层修复,消除
+    #     sec-ch-ua 里的 HeadlessChrome 字样 + 让 User-Agent 的 Chrome/x 与 sec-ch-ua
+    #     的 v= 对齐(CF 拿来对照,版本错位即视为伪造)。未装真 Chrome 自动降级 bundled。
+    "playwright-stealth>=2.0",
+]
+
+[project.optional-dependencies]
+deploy = [
+    # 上界是有意偏离「只写下界」惯例的：asyncssh 是唯一一个握着能提权的密码、
+    # 并决定 known_hosts 校验默认行为的依赖；仓库无 lockfile 也无 CI，一次
+    # `pip install` 拉到 3.x 的 API 变更就可能静默改掉 known_hosts 行为（KTD9）。
+    "asyncssh>=2.24.0,<3",
+]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+    "ruff>=0.6",
+    "mypy>=1.11",
+]
+
+[project.scripts]
+hawkeye = "hawkeye.__main__:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.mypy]
+python_version = "3.11"
+packages = ["hawkeye"]
+mypy_path = "src"
+strict = true

@@ -1,0 +1,160 @@
+# HawkEye 示例配置。复制为 config.toml 后填写自己的值。
+# 注意：config.toml 含 Telegram 密钥，请将其权限收紧为 600（chmod 600 config.toml）。
+#
+# 另请注意：若之后在 Telegram 里用 /add、/del 增删监控，config.toml 会被整份重写，
+# 本文件里的注释与排版不保证保留（改写前会留一份 config.toml.bak.<时间戳>，同样含明文
+# token、权限 600、只保留最近 10 份）。想长期保住注释，就只手工编辑配置。
+#
+# 结构为三层：商家 [[merchants]] → 页面 [[merchants.pages]] → 元素
+# [[merchants.pages.elements]]。同一页面的多个元素共享一次页面加载，减少重复配置。
+# 默认值向下级联：全局 → 商家 → 页面，下层可覆盖上层
+# （poll_interval_secs / wait_until / nav_timeout_secs / failure_threshold / selector_type）。
+#
+# 另有一种并行的「列表新条目监控」模式，用顶层 [[watches]] 块表达（见文件末尾）：
+# 每轮抓一次论坛/列表页，按帖子 ID 去重发现新帖，标题命中关键字则逐条推送。
+# [[merchants]] 与 [[watches]] 至少配置一个即可，两者可同时存在。
+
+# ---- 全局默认（可被商家、页面逐层覆盖）----
+poll_interval_secs = 60        # 轮询间隔，默认 1 分钟
+failure_threshold = 3          # 连续失败多少次后发一条告警
+state_path = "state.json"      # 状态文件路径
+max_concurrent_fetches = 4     # 同时打开的无头浏览器页面上限（控内存）
+nav_timeout_secs = 30          # 单次导航超时，同时也是元素等待的预算（秒）
+# 默认等待策略：load | domcontentloaded | networkidle。
+# networkidle 要求「连续 500ms 无网络连接」，任一第三方脚本（GA/GTM）或后台轮询
+# 卡住就永不触发，goto 会白等满 nav_timeout_secs 后超时；Playwright 官方亦标注
+# DISCOURAGED。动态内容改由元素级等待保证，故默认用 domcontentloaded。
+wait_until = "domcontentloaded"
+selector_type = "auto"         # 默认选择器类型：auto | css | xpath（auto 以 // 开头判为 xpath）
+
+# ---- 浏览器环境维度（Chromix 风格 launch 参数的 TOML 入口）----
+# 这些字段控制「让站点看到的浏览器人设」：HTTP 头 / Client Hints / navigator.languages
+# / Intl.DateTimeFormat 等可观测值在每一层都保持一致，反爬常按「这些维度是否互相
+# 矛盾」判定 headless 流量。HawkEye 不像 Chromix 那样管到 canvas/WebGL/字体（由
+# playwright-stealth 包覆盖 JS 层），但这里四件套（locale / timezone_id /
+# color_scheme / viewport）仍要走 Playwright context 形参。
+#
+# 注意：TOML 把同一 section header 内的 key 视为该 table 字段，所以这一段必须写在
+# [telegram] 之前（与现有 poll_interval_secs / wait_until 等全局字段同一段）。
+# [fingerprint]
+# user_agent = "Mozilla/5.0 ..."  # 留空时用「与 Chromium 主版本对齐」的 UA
+# locale = "zh-CN"                # 留空则跟随系统 locale
+# timezone_id = "Asia/Shanghai"   # IANA 时区 ID
+# color_scheme = "light"          # light | dark | no-preference | null
+# viewport = { width = 1366, height = 768 }
+
+# ---- 代理（HTTP / SOCKS5）----
+# 配置代理后该配置段下面的所有 [[merchants]] / [[watches]] 都走代理；某个商家 / 监
+# 控目标想换代理就在它自己的表里再写一份。字符串简写与结构化字段都可：
+#   proxy = "http://user:pass@host:port"      # HTTP/HTTPS
+#   proxy = "socks5://host:port"               # SOCKS5（落到 Chromium CLI 形参）
+#   proxy = { server = "http://...", username = "u", password = "p", bypass = "*.x" }
+# HTTP 代理走 Playwright proxy 字段；SOCKS5 走 Chromium 的 --proxy-server 形参
+# （Playwright 对 SOCKS 不完整生效）。Chromium CLI 形参无法表达 userinfo，SOCKS5
+# 鉴权只能交给应用层代理前置。
+# proxy = "http://127.0.0.1:7890"
+
+[telegram]
+# bot_token 由 @BotFather 的 /newbot 获得。
+# chat_id 获取前提：先用该账号私聊 bot 并发送 /start——Telegram 不允许 bot 主动
+# 向陌生用户发起会话，否则 sendMessage 恒返回 400 chat not found。之后访问
+# https://api.telegram.org/bot<token>/getUpdates 读 result[].message.chat.id。
+# 群聊为负数 id，且需先把 bot 拉进群；群升级为超级群后 id 会变为 -100 前缀。
+bot_token = "123456:ABC-your-bot-token"
+chat_id = "987654321"
+
+# ---- 商家：一组商品页面 ----
+[[merchants]]
+name = "yunyoo"
+poll_interval_secs = 90        # 可选，覆盖全局，作为本商家下所有页面的默认
+# 商家级 fingerprint / proxy 覆盖：inline table 形式（TOML 不允许同 section header
+# 在 [[merchants]] 内重复出现两次）。这家想换语言/时区/代理，直接写在这里：
+# fingerprint = { locale = "en-US", timezone_id = "America/New_York" }
+# proxy = "socks5://10.0.0.1:1080"
+
+# 商品页面：一次导航即提取其下全部元素
+[[merchants.pages]]
+name = "fid1 gid27 购物车"
+url = "https://yunyoo.cc/cart?fid=1&gid=27"
+# wait_until = "networkidle"   # 可选，覆盖商家/全局
+# nav_timeout_secs = 30        # 可选，覆盖商家/全局
+# failure_threshold = 3        # 可选，覆盖商家/全局（页面加载与元素提取共用此阈值）
+
+# 同一页面下的多个监控元素（共享上面这一次页面加载）
+[[merchants.pages.elements]]
+name = "第4个商品是否可售"
+# Playwright 原生支持 XPath，可直接粘贴浏览器复制出来的 XPath；也可用 CSS。
+selector = "//*[@id=\"yy-cart-page\"]/div[3]/main/div[2]/div[2]/article[4]/div/div/span"
+# selector_type = "auto"       # 可选，覆盖商家/全局：auto | css | xpath
+# nth = 0                      # 可选，多个匹配时取第几个（从 0 开始），缺省取第一个
+
+[[merchants.pages.elements]]
+name = "第5个商品是否可售"
+selector = "//*[@id=\"yy-cart-page\"]/div[3]/main/div[2]/div[2]/article[5]/div/div/span"
+
+# 自定义提取：用 JS 表达式对元素求值，字符串返回值即状态值。
+# 适用于「class 是否包含某关键字」「某 attribute 是否存在」「按钮 disabled 状态」
+# 等纯文本路径拿不到/不直观的场景。js 非空时完全取代 inner_text。
+# [[merchants.pages.elements]]
+# name = "按钮是否可订"
+# selector = "#order-button"
+# js = "el => el.classList.contains('disabled') ? '售罄' : '可订'"
+# JS 返回 null/undefined → 等同「未匹配」；返回空字符串 → 「JS 表达式返回空字符串」。
+# JS 抛错 → 归为「提取失败：…」（reason 里会带 JS 原文，便于排查）。
+#
+# 跳转 URL：可选，填了就在 Telegram 通知里附上这条链接,点击消息直跳目标下单/详情页。
+# 留空时通知沿用所属 [[merchants.pages]] 的 url 推送——大多数场景下页面本身就是下单页,
+# 不用重复填。只有「监控详情页、想跳到带 SKU/数量的下单页」这类场景才需要填。
+# [[merchants.pages.elements]]
+# name = "下单按钮可点性"
+# selector = "#order-button"
+# url = "https://example.com/cart?sku=ABC&qty=1"
+
+# 可以在同一商家下继续添加更多页面：
+# [[merchants.pages]]
+# name = "另一个商品页"
+# url = "https://yunyoo.cc/cart?fid=1&gid=28"
+# [[merchants.pages.elements]]
+# name = "库存状态"
+# selector = "#stock-status"
+
+# 也可以添加更多商家：
+# [[merchants]]
+# name = "example-shop"
+# [[merchants.pages]]
+# name = "商品123"
+# url = "https://example.com/product/123"
+# [[merchants.pages.elements]]
+# name = "价格"
+# selector = ".price > span"
+
+# ---- 列表新条目监控：发现论坛/列表页上「标题命中关键字的全新帖子」----
+# 每轮抓一次列表页，用 link_selector 定位每个帖子的标题链接 <a>，从其 href 取帖子 ID、
+# 从链接文本取标题；ID 不在已见集合中才算新帖，标题命中关键字即推送一条独立 Telegram。
+# 判新只看帖子 ID，与帖子在列表中的位置/排序无关（列表按回帖时间重排不会误报）。
+# 首次运行静默建基线（只记录当前可见 ID、不推送），避免上线瞬间刷屏历史帖。
+[[watches]]
+name = "NodeSeek 首页"
+url = "https://www.nodeseek.com/"
+# link_selector 匹配列表中每个帖子的标题链接 <a>（可粘贴浏览器复制的 XPath，也可用 CSS）
+link_selector = '//*[@id="nsk-body-left"]/ul/li/div/div[1]/a'
+# 关键字列表：子串匹配、不区分大小写、任一命中即命中（OR）；只针对标题
+keywords = ["hk"]
+# id_pattern 可选：用捕获组 1 从 href 提取帖子 ID；缺省时取 href path 末段。
+# 例：href="/post-911200-1" 配 'post-(\d+)-' → ID "911200"
+id_pattern = 'post-(\d+)-'
+# 以下均可选，缺省沿用全局默认，可按需覆盖：
+# selector_type = "auto"       # auto | css | xpath
+# poll_interval_secs = 60
+# wait_until = "domcontentloaded"
+# nav_timeout_secs = 30
+# failure_threshold = 3        # 列表加载/提取连续失败达阈值发一条告警
+
+# 可以继续添加更多列表监控目标（其他论坛或列表页）：
+# [[watches]]
+# url = "http://sb.sb/"
+# link_selector = "/html/body/main/div/div/div/div/ul/li/div[2]/div[1]/a"
+# keywords = [
+#     "jp",
+# ]
+# name = "烧饼论坛"
