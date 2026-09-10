@@ -139,9 +139,12 @@ def test_normalize_text() -> None:
 
 # 模拟一个带 class 的按钮：vmiss 场景的镜像。让两个 article 的 class 不同，
 # JS 通过 classList.contains 区分「售罄/可订」。
-_JS_HTML = """
-<article id="card-1" class="product"><a href="#" class="btn btn-order">Commander</a></article>
-<article id="card-2" class="product"><a href="#" class="btn btn-order disabled">Commander</a></article>
+_JS_HTML = """<article id="card-1" class="product">
+<a href="#" class="btn btn-order">Commander</a>
+</article>
+<article id="card-2" class="product">
+<a href="#" class="btn disabled">Commander</a>
+</article>
 """
 
 
