@@ -35,3 +35,6 @@ env/
 
 # macOS
 .DS_Store
+
+# Rust 构建产物
+rust/target/
