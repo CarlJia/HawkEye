@@ -3,8 +3,11 @@
 24×7 监控指定网页元素的文本变化，变化时通过 Telegram 推送「旧值 → 新值」。
 典型用途：商品「是否可售」状态（充足 / 较少 / 售罄）的到货/变更提醒。
 
-基于 **Python + Playwright 无头浏览器**：能渲染 JS 动态页面，选择器同时支持
-CSS 与 XPath（可直接粘贴浏览器复制出来的 XPath）。
+基于 **Rust（chromiumoxide / CDP 直连无头浏览器）**：能渲染 JS 动态页面，选择器同时支持
+CSS 与 XPath（可直接粘贴浏览器复制出来的 XPath）。反 bot 双层防护：优先用系统安装的
+真 Google Chrome（HTTP 层对齐），未装时降级 Playwright 下载的 chromium；JS 层由打包进
+二进制的 stealth 注入（playwright-stealth 等价的 evasion 脚本）负责，UA / Accept-Language
+另经 CDP `setUserAgentOverride` 覆盖到 HTTP 头，保证两层指纹一致。
 
 除元素文本监控外，还支持并行的「列表新条目监控」：定期抓取论坛/列表页，按帖子 ID
 去重发现「标题命中关键字的全新帖子」并逐条推送（首个实例：NodeSeek 首页含 `hk` 的新帖）。
@@ -26,21 +29,16 @@ CSS 与 XPath（可直接粘贴浏览器复制出来的 XPath）。
 
 ## 安装
 
-需要 Python 3.11+（开发使用 3.14）。Homebrew 的 Python 受 PEP 668 管控，请用 venv。
+需要 Rust 工具链（[rustup](https://rustup.rs/)）与本机浏览器（优先 Google Chrome；
+未装时自动降级 Playwright 下载的 bundled chromium）。
 
 ```bash
-python3 -m venv .venv
-source .venv/bin/activate          # fish: source .venv/bin/activate.fish
-pip install -e ".[dev]"            # 安装开发依赖（测试等）
-pip install -e ".[deploy]"          # 可选：解锁 hawkeye init / hawkeye deploy
-playwright install --with-deps chromium   # 下载 Chromium 及系统依赖
+cd rust
+cargo build --release          # 产出 rust/target/release/hawkeye
 ```
 
-`.[deploy]` 不安装时，`hawkeye init`（配置向导）与 `hawkeye deploy`（一键部署到 VPS）
-不可用，其余功能不受影响。
-
-运行时依赖三个包：`playwright`（无头浏览器）、`httpx`（Telegram HTTP 调用）、
-`tomli-w`（把配置写回 TOML，控制命令改配置时用到）。
+可选环境变量 `PLAYWRIGHT_BROWSERS_PATH` 指定 Playwright chromium 的缓存位置
+（缺省 `~/Library/Caches/ms-playwright` 或 `~/.cache/ms-playwright`）。
 
 ## 配置
 
@@ -49,24 +47,19 @@ cp config.example.toml config.toml
 chmod 600 config.toml              # 内含 Telegram 密钥，务必收紧权限
 ```
 
-Windows 没有 `chmod` 时请用 `icacls` 收紧 ACL；若执行失败会打印告警，权限收紧
-属于尽力而为，请自行确认配置文件不在共享目录。
-
-### 两条命令上机（Debian / Ubuntu + macOS / Windows）
-
-安装可选依赖后，两条命令即可完成从零到服务运行：
+### 两条命令上机（Debian / Ubuntu VPS）
 
 ```bash
 hawkeye init                              # 交互式问 bot_token / chat_id，生成 config.toml
 hawkeye deploy                            # 收集 VPS 信息，打包上传，在 VPS 上完成全部安装
 ```
 
-`init` 与 `deploy` 在 macOS / Windows / Linux 均可运行。监控守护进程本身仍限 Linux /
-macOS（VPS 上跑）。
+`init` 与 `deploy` 均为内建子命令，无可选依赖。监控守护进程本身需要本机可用的
+Chromium（macOS / Linux）。
 
 ### `hawkeye init` 详解
 
-`init` 在交互式向导里问两个问题后直接写出文件，不会跑 Playwright 或网络检查（除非你选自检）：
+`init` 在交互式向导里问两个问题后直接写出文件，不会起浏览器或发网络请求（除非你选自检）：
 
 ```
 $ hawkeye init
@@ -77,7 +70,7 @@ $ hawkeye init
   → 调用 Telegram API 验证 token + chat_id
   → 永久性拒绝（400/401/403/404）会就地重问，不会写盘
   → 网络异常只告警，继续走完流程
-  → 跳过自检完全不加载 httpx
+  → 跳过自检不发起任何网络请求
 请确认保存？(y/N，回车取消) y
 已写入配置：
   路径       config.toml
@@ -103,10 +96,10 @@ $ hawkeye deploy
   → 首次连接：打印服务器 SHA256 指纹，等待确认（输入 y/yes/是/确认/确定/保存 其一）
     确认后指纹写入 ~/.ssh/known_hosts，此后每次自动校验
   → 探测 id -u / sudo 可用性；无权限在打包之前退 1
-正在打包……（本地操作，秒级完成）
+正在打包……（含 cargo build --release，首次编译较久）
 正在上传……（~zip 大小决定耗时）
 正在远端安装……
-[HawkEye] 正在远端后台安装 Chromium（首次约 10–15 分钟）……
+[HawkEye] 远端若无 Chromium 会尝试 apt-get 安装……
   → 服务已启用，配置已就绪
 安装完成。常用运维命令：
   systemctl status hawkeye    # 查看服务状态
@@ -137,9 +130,6 @@ systemctl status hawkeye
 # 跟随日志（实时看监控心跳）
 journalctl -u hawkeye -f
 
-# 查看 Telegram 是否收到监控心跳消息（正常约每分钟一条 DEBUG）
-journalctl -u hawkeye --since "1 minute ago" | grep -v "^$"
-
 # 修改配置后直接生效（Telegram 命令会即时写回 config.toml）
 # 也可以直接 vim /opt/hawkeye/config.toml 然后：
 systemctl reload-or-restart hawkeye
@@ -147,8 +137,10 @@ systemctl reload-or-restart hawkeye
 # 升级（再次运行 hawkeye deploy 即可，config.toml 与 state.json 保留）
 hawkeye deploy
 
-# 完全卸载
-sudo /opt/hawkeye/deploy.sh uninstall
+# 完全卸载（Rust 版未带 uninstall 命令，手工三行）
+sudo systemctl disable --now hawkeye
+sudo rm /etc/systemd/system/hawkeye.service && sudo systemctl daemon-reload
+sudo rm -rf /opt/hawkeye
 ```
 
 ### 故障排查
@@ -192,9 +184,11 @@ locale / timezone / color_scheme / viewport 等可观测值在 HTTP 头 / Client
 是否互相矛盾」判定 headless 流量的依据。HawkEye 把这些做成顶层字段
 （Chromix 风格的 launch 参数）：在 `[telegram]` 之前写 `[fingerprint]` 即为全局；
 某个商家 / 监控目标想换就 inline table `fingerprint = { ... }` 覆盖。留空时
-HawkEye 维持与 Chromium 主版本对齐的默认 UA、跟随系统 locale。其余 JS 层指纹
-（navigator.webdriver / UA Brands / chrome.runtime / plugins / WebGL）由
-`playwright-stealth` 包负责——这是两个互不重叠的补丁层。
+HawkEye 维持与 Chromium 主版本对齐的默认 UA、跟随系统 locale。UA 与
+Accept-Language 同时经 CDP `Emulation.setUserAgentOverride` 覆盖到 HTTP 头，
+与 JS 层 stealth 补丁同值——两层不一致正是 CF 判定伪造 UA 的信号。其余 JS 层指纹
+（navigator.webdriver / UA Brands / chrome.runtime / plugins / WebGL）由打包进二进制的
+stealth 注入负责（playwright-stealth 等价）——这是两个互不重叠的补丁层。
 
 ```toml
 # 全局（写在 [telegram] 之前）
@@ -212,9 +206,8 @@ fingerprint = { locale = "en-US", timezone_id = "America/New_York" }
 
 ### 代理（`proxy` 字段）
 
-HTTP / SOCKS5 代理按 Chromix 思路集中翻译：HTTP 代理走 Playwright `new_context(
-proxy=...)` 字段；SOCKS5 走 Chromium `--proxy-server` CLI 形参（Playwright 的 proxy
-字段对 SOCKS 不完整生效）。字符串简写与结构化字段都接受：
+HTTP / SOCKS5 代理集中翻译为 Chromium `--proxy-server` CLI 形参（chromiumoxide 的
+CDP 代理支持对 SOCKS 不完整生效，统一走 CLI 最稳）。字符串简写与结构化字段都接受：
 
 ```toml
 # 全局（写在 [telegram] 之前）
@@ -251,7 +244,7 @@ js = "el => el.classList.contains('disabled') ? '售罄' : '可订'"
 - 空字符串 → 「JS 表达式返回空字符串」（诊断文案区分于文本模式的「文本为空」）；
 - 抛错（语法错、`el.foo` 不存在等）→「提取失败：{JS 报错原文}」，由失败告警路径处理。
 
-JS 表达式以字符串形式由 Playwright 在浏览器里执行。常见用法见 `config.example.toml`
+JS 表达式以字符串形式经 CDP 在浏览器里执行。常见用法见 `config.example.toml`
 的「自定义提取」示例。
 
 状态文件 `state.json` 无需手动创建：首次运行会为每个元素建立基线并自动生成。
@@ -291,14 +284,13 @@ ID 不在「已见集合」中才算新帖，标题命中关键字即推送一�
 
 ## 运行
 
-`pip install -e ".[dev]"` 之后，pyproject.toml 里的 `[project.scripts]` 会装出
-`hawkeye` 控制台命令，与 `python -m hawkeye` 完全等价——前者更短、后者不依赖
-console_script 注册（适合临时跑/容器里用）。两者参数一致，按习惯选一个即可。
+用 `cargo build --release` 产出的二进制直接运行（路径按需加进 `PATH`）：
 
 ```bash
-hawkeye -c config.toml               # 前台运行（与 python -m hawkeye -c config.toml 等价）
-python -m hawkeye -c config.toml     # 等价形式，不依赖 console_script
-hawkeye -c config.toml -v            # 附带调试日志
+rust/target/release/hawkeye -c config.toml          # 前台运行
+rust/target/release/hawkeye -c config.toml -v       # 附带调试日志
+# 开发期也可：
+cargo run --release -c config.toml
 ```
 
 ### 本地调试
@@ -381,27 +373,17 @@ hawkeye -c config.toml --log-level WARNING # 只保留告警及以上，压低�
   绝并提示先修文件。
 
 
-## 一键部署（Debian / Ubuntu）
+## 部署（Debian / Ubuntu）
 
-`deploy.sh` 只负责 VPS 服务器侧的安装与卸载，不承担本机打包或上传职责。通常在本机
-安装 `.[deploy]` 后使用 `hawkeye deploy` 完成收集 VPS 信息、打包上传和远端安装。
-服务器上也可以直接运行：
+推荐用 `hawkeye deploy`（见上文详解）完成收集 VPS 信息、打包、上传与远端安装。
+远端 `install.sh` 幂等，可重复运行以升级（保留服务器上已有的 `config.toml` 与
+`state.json`）；配置三态处理与 `--overwrite-config` 语义同上文。
+VPS 上不需要 Python / Playwright 环境，只需要：systemd、一个 Chromium
+（`install.sh` 探测 `chromium` / `chromium-browser` / `google-chrome`，缺失时尝试
+`apt-get install`，装不上只告警不阻断）、`unzip` 或 `python3`（任一即可，用于解压）。
 
-```bash
-sudo ./deploy.sh install
-```
-
-脚本会自动完成：检测系统与 Python（要求 3.11+）、用 apt 安装依赖、创建 `hawkeye` 系统用户、
-将项目部署到 `/opt/hawkeye`、建立 venv 并安装、用 Playwright 下载 Chromium 及其系统依赖、
-生成 `config.toml` 模板（权限 600），并写入、启用下文的 systemd 服务。
-
-配置可通过 `--config <路径>` 指定本机配置文件；`--overwrite-config` 强制用本机配置覆盖远端
-已有配置。默认按以下三态处理：
-
-- 远端没有 `config.toml`：采用本机配置（若提供）。
-- 远端 `config.toml` 仍含占位符：采用本机配置，并先备份远端文件。
-- 远端已有真实配置：保留远端配置，本机那份本次不生效；确需覆盖时加
-  `--overwrite-config`。
+升级时 `install.sh` 会先把旧二进制备份为 `/opt/hawkeye/hawkeye.old` 再替换；
+回滚只需 `sudo mv hawkeye.old hawkeye && sudo systemctl restart hawkeye`。
 
 首次安装后若 `config.toml` 仍是模板，服务不会自动启动；填好 Telegram 凭据后再启动：
 
@@ -411,41 +393,40 @@ sudo systemctl start hawkeye
 sudo journalctl -u hawkeye -f               # 跟随日志
 ```
 
-`install` 幂等，可重复运行以升级（保留服务器上已有的 `config.toml` 与 `state.json`）。卸载：
+完全卸载（Rust 版未带 uninstall 命令，手工三行）：
 
 ```bash
-sudo /opt/hawkeye/deploy.sh uninstall             # 交互确认是否删除数据目录
-sudo /opt/hawkeye/deploy.sh uninstall -y          # 非交互，一并删除 /opt/hawkeye 与 hawkeye 用户
-sudo /opt/hawkeye/deploy.sh uninstall --keep-data # 只移除服务，保留数据
+sudo systemctl disable --now hawkeye
+sudo rm /etc/systemd/system/hawkeye.service && sudo systemctl daemon-reload
+sudo rm -rf /opt/hawkeye
 ```
 
 ### 手工上传路径（进阶）
 
-手工上传路径仍可用；`./deploy.sh package` 现在委托给 Python 的 `hawkeye package`，三平台
-均可运行。不用把整个仓库传上去，在本地开发机一条命令打出部署包：
+不用 `deploy` 也能手工上传；本地开发机一条命令打出部署包（内含 `cargo build --release`，
+首次编译较久）：
 
 ```bash
-./deploy.sh package        # 无需 sudo，产出 dist/hawkeye-<版本>-<时间戳>.zip
+hawkeye package                # 产出 dist/hawkeye-<版本>-<时间戳>.zip
 ```
 
-包内只含运行所需文件：`src/`、`pyproject.toml`、`config.example.toml`、`README.md`、
-`deploy.sh`；本地 `config.toml`、`state.json`、缓存与 IDE 文件都不会入包，可放心传输。
-命令结束时会打印带实际文件名的上传更新命令：
+包内只含运行所需文件：`bin/hawkeye`（release 二进制）、`config.example.toml`、
+`install.sh`、`README.md`；本地 `config.toml`、`state.json`、缓存与 IDE 文件都不会
+入包（白名单之外另有七族敏感文件名双侧扫描兜底）。命令结束时会打印上传更新命令：
 
 ```bash
 scp dist/hawkeye-0.1.0-20260905-165656.zip user@vps:/tmp/
 ssh user@vps
 unzip -q /tmp/hawkeye-0.1.0-20260905-165656.zip -d /tmp && cd /tmp/hawkeye-0.1.0-20260905-165656
-sudo ./deploy.sh install
+sudo ./install.sh install
 ```
 
-`install` 会用包内代码整体替换 `/opt/hawkeye/src`（不留已删除的模块），保留服务器上的
-`config.toml` 与 `state.json`，并在配置就绪时重启服务。每个包解压成带时间戳的独立目录，
-不会和上一版混在一起。
+`install` 会把二进制替换到 `/opt/hawkeye/hawkeye`（旧版先备份为 `hawkeye.old`），
+保留服务器上的 `config.toml` 与 `state.json`，并在配置就绪时重启服务。
 
 ## 手动部署为 systemd 服务（进阶）
 
-`/etc/systemd/system/hawkeye.service`：
+`/etc/systemd/system/hawkeye.service`（与 `install.sh` 生成的单元一致）：
 
 ```ini
 [Unit]
@@ -455,13 +436,12 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-User=hawkeye
 WorkingDirectory=/opt/hawkeye
-ExecStart=/opt/hawkeye/.venv/bin/python -m hawkeye -c /opt/hawkeye/config.toml
-Restart=on-failure
-RestartSec=10
+ExecStart=/opt/hawkeye/hawkeye -c /opt/hawkeye/config.toml
+Restart=always
+RestartSec=5
 # 退出码 2 表示配置错误或 Telegram 凭据/chat_id 不可用：重启无用，直接停在
-# failed 状态等人工修配置，避免每 10 秒空转重启一次。
+# failed 状态等人工修配置，避免空转重启循环。
 RestartPreventExitStatus=2
 
 [Install]
@@ -489,7 +469,7 @@ journalctl -u hawkeye -f
 
 - **密钥安全**：`bot_token`、`chat_id` 明文存于 `config.toml`，请 `chmod 600`，
   切勿提交到版本库（`.gitignore` 已忽略 `config.toml` 与 `state.json`）。
-  日志已装脱敏过滤器，token 在 httpx 打印的请求 URL 中会显示为 `<REDACTED>`；
+  通知层带脱敏处理，token 在日志里显示为 `<REDACTED>`；
   若 token 曾出现在旧日志或被贴到别处，请用 @BotFather 的 `/revoke` 重置。
 - **备份文件同样敏感**：通过 Telegram 命令改配置时，会在同目录留下
   `config.toml.bak.<时间戳>`，**其中同样含明文 token**。它们的权限也是 600、只保留最近
@@ -513,14 +493,6 @@ journalctl -u hawkeye -f
 若不想收到这条「假」通知，**改 `config.toml` 前先从 `state.json` 删掉对应条目**（删前
 可记录其当前值，下次真有变化时仍能正常通知）。
 
-### Windows 注意事项
-
-- `getpass` 在 mintty / Git Bash 下可能回显输入，请使用 Windows Terminal 或 PowerShell。
-- 控制台编码尽量设 UTF-8（`chcp 65001`），中文才不乱码。
-- `icacls` 权限收紧是尽力而为；若执行失败会打印告警，请自行确认 `config.toml` 不在
-  共享目录。
-- 测试套件的权限断言在 Windows 上不通过，测试只在 macOS / Linux 上跑。
-
 ### 部署失败了怎么办
 
 1. 查看本机输出的日志路径（在「正在部署……」之后会打印
@@ -528,10 +500,11 @@ journalctl -u hawkeye -f
 2. 连接 VPS：`ssh user@vps`。
 3. 查看日志：`journalctl -u hawkeye -f` 或
    `cat /var/tmp/hawkeye-deploy.XXXXXXXXXX/install.log`。
-4. 若升级失败，按提示执行恢复命令（三行以内），通常是把 `src.old` 换回 `src` 并重启服务。
+4. 若升级失败，按提示执行恢复命令（三行以内），通常是 `sudo mv /opt/hawkeye/hawkeye.old
+   /opt/hawkeye/hawkeye` 并重启服务。
 
 **重要：升级失败时不会有任何 Telegram 告警。** 进程在 `Notifier` 构造出来之前就死了，
-10 秒一次的静默重启循环不会发出通知。**没收到告警 ≠ 部署成功。**
+静默重启循环不会发出通知。**没收到告警 ≠ 部署成功。**
 
 - **选择器脆弱性**：浏览器复制的定位式 XPath（如 `.../article[4]/div/div/span`）
   依赖页面结构，站点改版易失效。可优先选用带 `id`/`class` 的稳定选择器。
@@ -540,40 +513,25 @@ journalctl -u hawkeye -f
 ## 开发
 
 ```bash
-pytest                     # 运行测试（test_extract / test_fetch / test_packaging / test_wizard 需已安装 chromium）
-ruff check . && ruff format --check .
-mypy src/hawkeye
+cd rust
+cargo test                                    # 单元 + 集成测试（无需浏览器）
+cargo test --test browser_smoke -- --ignored --test-threads=1   # 真实浏览器冒烟（需本机 Chromium）
+cargo fmt --check && cargo clippy             # 格式与静态检查
 ```
+
+真实浏览器冒烟测试覆盖本地夹具的 CSS/XPath/JS 提取、列表提取与 UA 跨层一致性；
+多个用例共用 chromiumoxide 的默认 profile 目录，必须 `--test-threads=1` 串行跑。
 
 ### 本地开发调试
 
-修完代码、跑通单测后，还要看真实页面渲染效果再上线。`test_extract` 等单测用
-fake locator 不实际启 Chromium，但选择器微调还是要靠真浏览器确认。
-
 ```bash
-# 跑全部测试（需要 chromium 才能跑通 test_extract / test_fetch / test_packaging / test_wizard）
-pytest
-
-# 跑单个文件 / 某个测试名 / 首个失败即停 —— 反馈循环的核心
-pytest tests/test_config.py
-pytest tests/test_fetch.py::test_xxx
-pytest -x                       # 首个失败即停，不跑剩下的
-pytest -k xxx                   # 按名字筛
-pytest --lf                     # 只跑上次失败的
-pytest -s                       # 不抓 stdout，breakpoint() / print() 输出可见
-
-# 跳过需要 chromium 的测试（不想装 Chromium 也能跑主体）
-pytest --ignore=tests/test_extract.py --ignore=tests/test_fetch.py --ignore=tests/test_packaging.py --ignore=tests/test_wizard.py
-
 # 改完实际启动看效果：DEBUG 级别会把每轮抓取结果都打出来（见「本地调试」）
-hawkeye -c config.toml -v
+cargo run -- -c config.toml -v
 
 # 临时隔离一份配置做实验（不影响主 config.toml / state.json）
-cp config.toml config.toml.main.bak
-cp state.json state.json.main.bak
 cp config.example.toml config.debug.toml
-hawkeye -c config.debug.toml -v
+cargo run -- -c config.debug.toml -v
 
-# 启动到一半想进 debugger：在源码某行插 breakpoint()，再以 -s 跑 pytest，或：
-PYTHONBREAKPOINT=pudb hawkeye -c config.toml -v      # 需要 pip install pudb
+# 日志可按 target 过滤（如静音 chromiumoxide 的 WS Invalid message 噪音）
+RUST_LOG="info,chromiumoxide::handler=error" cargo run -- -c config.toml
 ```
