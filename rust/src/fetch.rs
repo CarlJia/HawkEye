@@ -12,7 +12,7 @@
 //!   消除 sec-ch-ua 里的 HeadlessChrome 字样与 UA 版本错位；未装时降级到
 //!   Playwright 下载的 bundled chromium。
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use chromiumoxide::Page;
@@ -118,23 +118,41 @@ fn running_as_root() -> bool {
     false
 }
 
+/// Chromium profile 目录：状态文件旁边的私有目录。
+///
+/// 不设 `user_data_dir` 时 chromiumoxide 会落到 `$TMPDIR/chromiumoxide-runner`——固定路径、
+/// 父目录全世界可写，而服务多以 root 运行；profile 里放着 cookie（含 CF 放行票）与 session，
+/// 同机任意用户都能预先创建或替换那个路径。放在状态文件旁边既收回了这个面，又保住了
+/// cookie 跨重启的持久化（换新目录意味着首次启动要重新过一遍挑战页）。
+fn profile_dir(state_path: &str) -> PathBuf {
+    Path::new(state_path)
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join("chromium-profile")
+}
+
 /// 构建 Chromium 启动配置。
 ///
-/// 形参一律走 chromiumoxide 的 builder 方法，不手拼字符串：它内部的 ArgsBuilder 会把每个形参
-/// 渲染成 `--<key>`，带前导 `--` 的字符串会被拼成 `----xxx` 而被 Chromium 忽略——沙箱、
-/// 无头模式、AutomationControlled 与代理全都踩过这个坑。
+/// 启动形参写成不带前导 `--` 的 `key` 或 `key=value`：chromiumoxide 内部的 ArgsBuilder 会给
+/// 每个形参补 `--`，自带前导 `--` 的字符串会被拼成 `----xxx` 而被 Chromium 静默忽略——
+/// 沙箱、无头模式、AutomationControlled 与代理全都踩过这个坑。
 ///
 /// `is_root` 为真时关闭沙箱：Linux 上 zygote 检测到以 root 运行且未关沙箱会直接拒绝启动
 /// （stderr 打印 "Running as root without --no-sandbox"），而服务默认以 root 运行。
 fn build_browser_config(
     exec: PathBuf,
+    profile_dir: &Path,
     proxy: Option<&ProxyConfig>,
     is_root: bool,
 ) -> Result<BrowserConfig, String> {
     let mut builder = BrowserConfig::builder()
         .chrome_executable(exec)
         .new_headless_mode() // --headless=new（旧默认是 --headless）
-        .hide() // --disable-blink-features=AutomationControlled
+        // 不用 `.hide()`：它除这个形参外还会把 viewport 从默认的 800x600 静默清成
+        // 「不模拟」（chromiumoxide 的 hide() 里那段），凭空少掉一维指纹，
+        // 而这副作用从方法名完全看不出来。
+        .arg("disable-blink-features=AutomationControlled")
+        .user_data_dir(profile_dir)
         .request_timeout(Duration::from_secs(60));
     if let Some(proxy) = proxy {
         // 代理走 CLI 形参（chromiumoxide 的 connect 代理对 SOCKS 支持有限）。
@@ -143,7 +161,20 @@ fn build_browser_config(
         } else {
             proxy.server.clone()
         };
+        // Chromium CLI 表达不了代理口令，带鉴权的代理只能不带凭据连过去（收到 407）。
+        // 这个失败此前是静默的，运维只能从「所有页面都加载失败」里猜。日志同样剥离 userinfo。
+        if proxy.username.is_some() || proxy.password.is_some() || server.contains('@') {
+            tracing::warn!(
+                "代理配了用户名/密码，但 Chromium CLI 无法携带代理凭据，本次将不带鉴权连接 \
+                 {}；请在应用层前置一个免鉴权的代理。",
+                redact_proxy_server(&server)
+            );
+        }
         builder = builder.arg(format!("proxy-server={server}"));
+        // bypass 是配置里公开的字段，此前从不落地（所有请求都走代理）。
+        if let Some(bypass) = proxy.bypass.as_deref().filter(|s| !s.is_empty()) {
+            builder = builder.arg(format!("proxy-bypass-list={bypass}"));
+        }
     }
     if is_root {
         builder = builder.no_sandbox();
@@ -355,12 +386,24 @@ async fn wait_for_challenge_clear(page: &Page, label: &str) -> bool {
 
 // ---- 浏览器管理 ----
 
+/// 关闭路径上每一步等待的预算。
+///
+/// chromiumoxide 的 `Browser::close()` 只把 `Browser.close` 写进 CDP，然后等对端回一个响应；
+/// WebSocket 若先断（Chromium 已退出、连接被重置），这个响应永远不来，`close()` 就永久挂起。
+/// systemd 默认 TimeoutStopSec=90s，挂住的进程只能等 SIGKILL，`systemctl restart` 于是卡满
+/// 90s 并以 'timeout' 失败收场。给每一步等待一个远小于该超时的预算，超时就直接结束子进程。
+///
+/// 优雅关闭与紧随其后的 kill 回收各用一次，故 `BrowserManager::close()` 最坏阻塞 2× 本值。
+const CLOSE_BUDGET_SECS: u64 = 5;
+
 /// 管理进程级共享 Chromium。
 pub struct BrowserManager {
     browser: tokio::sync::Mutex<Option<Browser>>,
     #[allow(dead_code)]
     fingerprint: Fingerprint,
     proxy: Option<ProxyConfig>,
+    /// 私有 Chromium profile 目录（见 [`profile_dir`]）。
+    profile_dir: PathBuf,
     chromium_major: std::sync::atomic::AtomicU32,
 }
 
@@ -425,6 +468,7 @@ impl BrowserManager {
             browser: tokio::sync::Mutex::new(None),
             fingerprint: config.fingerprint.clone(),
             proxy: config.proxy.clone(),
+            profile_dir: profile_dir(&config.state_path),
             chromium_major: std::sync::atomic::AtomicU32::new(0),
         }
     }
@@ -455,7 +499,7 @@ impl BrowserManager {
             }
         };
 
-        let config = build_browser_config(exec, self.proxy.as_ref(), is_root)?;
+        let config = build_browser_config(exec, &self.profile_dir, self.proxy.as_ref(), is_root)?;
         let (browser, mut handler) = Browser::launch(config)
             .await
             .map_err(|e| format!("启动 Chromium 失败：{}", first_line(&e.to_string())))?;
@@ -507,13 +551,32 @@ impl BrowserManager {
 
     pub async fn close(&self) {
         let mut guard = self.browser.lock().await;
-        if let Some(mut browser) = guard.take()
-            && let Err(e) = browser.close().await
-        {
-            tracing::warn!(
-                "关闭浏览器时忽略异常（驱动可能已退出）：{}",
-                first_line(&e.to_string())
-            );
+        if let Some(mut browser) = guard.take() {
+            match tokio::time::timeout(Duration::from_secs(CLOSE_BUDGET_SECS), browser.close())
+                .await
+            {
+                Ok(Ok(_)) => {}
+                Ok(Err(e)) => tracing::warn!(
+                    "关闭浏览器时忽略异常（驱动可能已退出）：{}",
+                    first_line(&e.to_string())
+                ),
+                Err(_) => {
+                    tracing::warn!(
+                        "等待浏览器优雅关闭超过 {CLOSE_BUDGET_SECS}s，改为直接结束其进程"
+                    );
+                    // kill 要等子进程被回收，同样可能等不到（子进程卡在不可中断睡眠时
+                    // SIGKILL 也只能排队），所以它也要有界。子进程上挂着 kill_on_drop，
+                    // 超时后丢弃这个 future 不会留下残留进程。
+                    let killed = tokio::time::timeout(
+                        Duration::from_secs(CLOSE_BUDGET_SECS),
+                        browser.kill(),
+                    )
+                    .await;
+                    if let Ok(Some(Err(e))) = killed {
+                        tracing::warn!("结束浏览器进程时忽略异常：{e}");
+                    }
+                }
+            }
         }
         tracing::info!("无头浏览器已关闭");
     }
@@ -757,12 +820,12 @@ mod tests {
 
     /// 用一个假 chrome 把 chromiumoxide 实际生成的命令行落盘，返回其 argv。
     ///
-    /// 真实的 Chromium 会因为 root/macOS 环境差异不可用，但「最终命令行长什么样」是纯
-    /// 确定性的——这正是本 bug 的现场：形参被 chromiumoxide 二次拼接后失真。
-    /// 用一个假 chrome 把 chromiumoxide 实际生成的命令行落盘，返回其 argv。
-    ///
     /// 真实 Chromium 会因 root/平台差异不可用，但「最终命令行长什么样」是纯确定性的——
     /// 本类 bug 的现场就在这一步：形参被 chromiumoxide 二次拼接后失真。
+    ///
+    /// 每次都用一个全新的临时目录，并在返回前整目录删掉：目录名只带 (pid, 序号) 而序号每次
+    /// 进程启动都从 0 重来，残留的 argv.txt 会在 PID 复用时被下一轮读到，让断言拿别人的
+    /// 命令行去比对（假通过或无法解释的假失败）。
     #[cfg(unix)]
     fn fake_chrome_argv(is_root: bool, proxy: Option<&ProxyConfig>) -> Vec<String> {
         use std::io::Write as _;
@@ -787,12 +850,13 @@ mod tests {
         drop(f);
         std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
 
-        let cfg = build_browser_config(script, proxy, is_root).unwrap();
+        // profile 目录落在同一个临时目录下，别让单测去写真实的状态目录旁边。
+        let cfg = build_browser_config(script, &dir.join("profile"), proxy, is_root).unwrap();
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .unwrap();
-        rt.block_on(async {
+        let argv = rt.block_on(async {
             let _child = cfg.launch().unwrap();
             for _ in 0..100 {
                 if let Ok(c) = std::fs::read_to_string(&out)
@@ -803,7 +867,9 @@ mod tests {
                 tokio::time::sleep(Duration::from_millis(50)).await;
             }
             panic!("假 chrome 没写出 argv");
-        })
+        });
+        std::fs::remove_dir_all(&dir).unwrap();
+        argv
     }
 
     fn proxy(server: &str) -> ProxyConfig {
@@ -870,6 +936,51 @@ mod tests {
             http.iter()
                 .any(|a| a == "--proxy-server=http://1.2.3.4:8080"),
             "HTTP 代理应落到命令行：{http:?}"
+        );
+
+        // bypass 是公开的配置字段，不能只停在配置里。
+        let bypassed = fake_chrome_argv(
+            false,
+            Some(&ProxyConfig {
+                server: "http://1.2.3.4:8080".into(),
+                username: None,
+                password: None,
+                bypass: Some("*.example.com;localhost".into()),
+            }),
+        );
+        assert!(
+            bypassed
+                .iter()
+                .any(|a| a == "--proxy-bypass-list=*.example.com;localhost"),
+            "bypass 应落到命令行：{bypassed:?}"
+        );
+    }
+
+    /// profile 目录跟着状态文件走；相对路径（配置里的默认写法）也要能正确拼接。
+    #[test]
+    fn test_profile_dir_follows_state_path() {
+        assert_eq!(profile_dir("state.json"), Path::new("chromium-profile"));
+        assert_eq!(
+            profile_dir("/var/lib/hawkeye/state.json"),
+            Path::new("/var/lib/hawkeye/chromium-profile")
+        );
+    }
+
+    /// 回归：profile 目录必须显式指定。
+    ///
+    /// 不指定时 chromiumoxide 会落到 `$TMPDIR/chromiumoxide-runner`——固定路径、父目录
+    /// 全世界可写，而这个进程以 root 跑、profile 里是 cookie（含 CF 放行票）与 session。
+    #[cfg(unix)]
+    #[test]
+    fn test_profile_dir_does_not_fall_back_to_shared_tmp() {
+        let argv = fake_chrome_argv(false, None);
+        let user_data_dir = argv
+            .iter()
+            .find(|a| a.starts_with("--user-data-dir="))
+            .unwrap_or_else(|| panic!("应显式指定 user-data-dir：{argv:?}"));
+        assert!(
+            !user_data_dir.contains("chromiumoxide-runner"),
+            "不能落回共享的默认 profile：{user_data_dir}"
         );
     }
 }

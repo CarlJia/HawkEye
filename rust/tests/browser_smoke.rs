@@ -7,6 +7,7 @@
 //! 多个用例共用 chromiumoxide 的默认 profile 目录，必须串行：
 //! `cargo test --test browser_smoke -- --ignored --test-threads=1`。
 
+use std::collections::{HashMap, HashSet};
 use std::io::{Read, Write};
 use std::net::TcpListener;
 
@@ -86,6 +87,55 @@ fn serve_header_echo() -> String {
         }
     });
     format!("http://{addr}/")
+}
+
+/// 杀掉本测试进程拉起的 Chromium（连同其 helper 子进程）。
+///
+/// 只认自己的后代：开发者本机常开着真的 Chrome，按名字全局 pkill 会误伤。
+#[cfg(unix)]
+fn kill_descendant_chromium() {
+    let out = std::process::Command::new("ps")
+        .args(["-eo", "pid=,ppid=,args="])
+        .output()
+        .expect("执行 ps 失败");
+    let mut children: HashMap<u32, Vec<(u32, String)>> = HashMap::new();
+    for line in String::from_utf8_lossy(&out.stdout).lines() {
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        if parts.len() < 3 {
+            continue;
+        }
+        let (Ok(pid), Ok(ppid)) = (parts[0].parse::<u32>(), parts[1].parse::<u32>()) else {
+            continue;
+        };
+        // args 里含空格（macOS 的可执行文件路径），拼接剩余片段整条比较。
+        children
+            .entry(ppid)
+            .or_default()
+            .push((pid, parts[2..].join(" ")));
+    }
+    let mut stack = vec![std::process::id()];
+    let mut seen = HashSet::new();
+    let mut targets = Vec::new();
+    while let Some(pid) = stack.pop() {
+        if !seen.insert(pid) {
+            continue;
+        }
+        for (child, args) in children.get(&pid).into_iter().flatten() {
+            let lower = args.to_ascii_lowercase();
+            if lower.contains("chrome") || lower.contains("chromium") {
+                targets.push(*child);
+            }
+            stack.push(*child);
+        }
+    }
+    assert!(
+        !targets.is_empty(),
+        "没找到本进程拉起的 Chromium，无法构造断连现场"
+    );
+    for pid in &targets {
+        // SAFETY：只对确认属于本进程树的 Chromium 发 SIGKILL。
+        unsafe { libc::kill(*pid as i32, libc::SIGKILL) };
+    }
 }
 
 fn dummy_config() -> Config {
@@ -179,6 +229,16 @@ async fn browser_smoke_extract_and_list() {
                 None,
                 Some("el => String(navigator.webdriver) === 'true' ? 'FAIL' : 'OK'"),
             ),
+            // viewport 模拟：chromiumoxide 默认 800x600。此前用 `.hide()` 顺带把它静默清成了
+            // 「不模拟」，页面退回窗口默认尺寸，依赖 innerWidth 做响应式分支的页面整批换 DOM。
+            element(
+                "yunyoo",
+                "购物车",
+                "viewport",
+                "body",
+                None,
+                Some("el => `${window.innerWidth}x${window.innerHeight}`"),
+            ),
             // 未匹配 → NoMatch
             element("yunyoo", "购物车", "不存在", "#nope", None, None),
             // 匹配但文本为空
@@ -237,6 +297,13 @@ async fn browser_smoke_extract_and_list() {
                 get("stealth"),
                 FetchResult::Ok { value: "OK".into() },
                 "stealth 注入"
+            );
+            assert_eq!(
+                get("viewport"),
+                FetchResult::Ok {
+                    value: "800x600".into()
+                },
+                "viewport 模拟（chromiumoxide 默认值）不能被 `.hide()` 之类的形参顺带关掉"
             );
             assert!(
                 matches!(get("不存在"), FetchResult::NoMatch { .. }),
@@ -386,4 +453,40 @@ async fn browser_smoke_ua_consistent_across_http_and_js_layers() {
         PageResult::LoadError { reason } => panic!("页面加载失败：{reason}"),
     }
     manager.close().await;
+}
+
+/// 回归：CDP WebSocket 已断时 `BrowserManager::close()` 仍须有界返回。
+///
+/// 现场（生产 systemd 日志）：Chromium 收到 `Browser.close` 后立即退出，WebSocket 随之断开，
+/// 该命令的响应再也回不来——chromiumoxide 的 `close()` 就挂在这个永不到来的响应上。
+/// systemd 默认 TimeoutStopSec=90s 之下 `systemctl restart` 卡满 90s 才被 SIGKILL，服务以
+/// result='timeout' 收场。修复前本用例会一直等到 20s 断言超时；修复后约 5s（关闭预算）返回。
+///
+/// 本用例会杀掉本进程拉起的全部 Chromium，须与其他用例串行（同文件头部的约定）。
+#[cfg(unix)]
+#[tokio::test]
+#[ignore = "需要真实 Chromium；显式 --ignored 运行"]
+async fn browser_close_is_bounded_when_cdp_socket_is_dead() {
+    let manager = BrowserManager::new(&dummy_config());
+    tokio::time::timeout(std::time::Duration::from_secs(60), manager.start())
+        .await
+        .expect("浏览器启动超时")
+        .expect("浏览器启动失败");
+
+    // 杀掉 Chromium：WebSocket 立刻断开，正是 close() 挂死的条件。
+    kill_descendant_chromium();
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+    let started = std::time::Instant::now();
+    tokio::time::timeout(std::time::Duration::from_secs(20), manager.close())
+        .await
+        .expect("CDP 已断时 close() 挂死：进程退出必须是有界操作");
+    // 关卡的关闭预算是 5s（fetch.rs 的 CLOSE_BUDGET_SECS），这里卡在 1.8 倍以内：
+    // 只断言「不无限挂起」的话，预算被悄悄放大到 10s、20s 也照样通过。
+    let elapsed = started.elapsed();
+    assert!(
+        elapsed < std::time::Duration::from_secs(9),
+        "断连后 close() 耗时 {elapsed:?}，远超 5s 的关闭预算：有界关闭退化了"
+    );
+    eprintln!("[smoke] 断连后 close() 耗时 {elapsed:?}");
 }

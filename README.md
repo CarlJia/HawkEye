@@ -242,9 +242,9 @@ CDP 代理支持对 SOCKS 不完整生效，统一走 CLI 最稳）。字符串�
 
 ```toml
 # 全局（写在 [telegram] 之前）
-proxy = "http://user:pass@127.0.0.1:7890"
+proxy = "http://127.0.0.1:7890"
 # 或结构化
-# proxy = { server = "socks5://1.2.3.4:1080", bypass = "*.example.com" }
+# proxy = { server = "socks5://1.2.3.4:1080", bypass = "*.example.com;localhost" }
 
 # 商家级覆盖（inline table）
 [[merchants]]
@@ -252,8 +252,13 @@ name = "shop-behind-vpn"
 proxy = "socks5://10.0.0.1:1080"
 ```
 
-代理密码不会留进启动 journal——日志打印时自动剥离 userinfo 段。SOCKS5 鉴权
-（用户名密码）无法用 Chromium CLI 形参表达，落到应用层代理前置解决。
+代理密码不会留进启动 journal——日志打印时自动剥离 userinfo 段。`bypass` 翻译为
+`--proxy-bypass-list`。
+
+**代理鉴权不被支持**：Chromium 的 CLI 形参表达不了代理口令，写成
+`http://user:pass@host:port` 只会把凭据丢掉，每个请求收到 407（启动时 WARN 提示）。
+需要鉴权的代理请在应用层前置一个免鉴权的代理（如本机的 `privoxy`/`gost`），
+再让 HawkEye 连那个前置层。
 
 ### 自定义提取（`js` 字段）
 

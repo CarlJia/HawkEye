@@ -6,6 +6,8 @@ config.toml.tmp
 state.json
 state.json.tmp
 state.json.corrupt.*
+# Chromium profile 目录，落在 state_path 旁边（见 rust/src/fetch.rs 的 profile_dir）。
+chromium-profile/
 # .hawkeye-deploy.toml 是 hawkeye deploy 写出的连接参数文件（不含密码），
 # 与打包的泄漏兜底同源（A6）。
 .hawkeye-deploy.toml
