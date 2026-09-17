@@ -93,17 +93,14 @@ fn proxy_is_socks5(proxy: &ProxyConfig) -> bool {
     proxy.server.starts_with("socks5://")
 }
 
-fn socks5_proxy_server_arg(proxy: &ProxyConfig) -> Option<String> {
-    if !proxy_is_socks5(proxy) {
-        return None;
+/// socks5://user:pass@host:port → socks5://host:port。
+///
+/// 用户名密码无法用 Chromium CLI 形参表达（落到应用层代理前置解决），这里只保留 host:port。
+fn socks5_server_without_userinfo(server: &str) -> String {
+    match server.rsplit_once('@') {
+        Some((_, host)) => format!("socks5://{host}"),
+        None => server.to_string(),
     }
-    let server = &proxy.server;
-    let stripped = if server.contains('@') {
-        format!("socks5://{}", server.rsplit_once('@')?.1)
-    } else {
-        server.clone()
-    };
-    Some(format!("--proxy-server={stripped}"))
 }
 
 /// 当前进程是否以 root 运行（getuid 或 geteuid 为 0）。
@@ -121,31 +118,14 @@ fn running_as_root() -> bool {
     false
 }
 
-/// 组装 Chromium 启动形参（代理走 CLI 形参，其余为工作流固有项）。
-///
-/// 沙箱开关不在这里：它必须走 chromiumoxide 的 `no_sandbox()`，理由见 `build_browser_config`。
-fn base_chromium_args(proxy: Option<&ProxyConfig>) -> Vec<String> {
-    let mut args = vec![
-        "--headless=new".to_string(),
-        "--disable-blink-features=AutomationControlled".to_string(),
-    ];
-    // SOCKS5 走 Chromium CLI 形参（CDP/Playwright 的 proxy 字段对 SOCKS 不完整生效）。
-    if let Some(proxy) = proxy
-        && let Some(socks_arg) = socks5_proxy_server_arg(proxy)
-    {
-        args.push(socks_arg);
-    }
-    args
-}
-
 /// 构建 Chromium 启动配置。
+///
+/// 形参一律走 chromiumoxide 的 builder 方法，不手拼字符串：它内部的 ArgsBuilder 会把每个形参
+/// 渲染成 `--<key>`，带前导 `--` 的字符串会被拼成 `----xxx` 而被 Chromium 忽略——沙箱、
+/// 无头模式、AutomationControlled 与代理全都踩过这个坑。
 ///
 /// `is_root` 为真时关闭沙箱：Linux 上 zygote 检测到以 root 运行且未关沙箱会直接拒绝启动
 /// （stderr 打印 "Running as root without --no-sandbox"），而服务默认以 root 运行。
-///
-/// 这里必须用 `no_sandbox()` 而不能往 `args` 里塞 `"--no-sandbox"`：chromiumoxide 会把每个
-/// 形参渲染成 `--<key>`，带前导 `--` 的字符串会被拼成 `----no-sandbox` 而被 Chromium 忽略，
-/// root 启动依旧失败（表现为解析 WebSocket URL 时的 unexpected end of stream）。
 fn build_browser_config(
     exec: PathBuf,
     proxy: Option<&ProxyConfig>,
@@ -153,14 +133,17 @@ fn build_browser_config(
 ) -> Result<BrowserConfig, String> {
     let mut builder = BrowserConfig::builder()
         .chrome_executable(exec)
-        .arg("--headless=new")
-        .args(base_chromium_args(proxy))
+        .new_headless_mode() // --headless=new（旧默认是 --headless）
+        .hide() // --disable-blink-features=AutomationControlled
         .request_timeout(Duration::from_secs(60));
-    // HTTP 代理走 Chromium CLI 形参（chromiumoxide 的 connect 代理支持有限）。
-    if let Some(proxy) = proxy
-        && !proxy_is_socks5(proxy)
-    {
-        builder = builder.arg(format!("--proxy-server={}", proxy.server));
+    if let Some(proxy) = proxy {
+        // 代理走 CLI 形参（chromiumoxide 的 connect 代理对 SOCKS 支持有限）。
+        let server = if proxy_is_socks5(proxy) {
+            socks5_server_without_userinfo(&proxy.server)
+        } else {
+            proxy.server.clone()
+        };
+        builder = builder.arg(format!("proxy-server={server}"));
     }
     if is_root {
         builder = builder.no_sandbox();
@@ -776,15 +759,22 @@ mod tests {
     ///
     /// 真实的 Chromium 会因为 root/macOS 环境差异不可用，但「最终命令行长什么样」是纯
     /// 确定性的——这正是本 bug 的现场：形参被 chromiumoxide 二次拼接后失真。
+    /// 用一个假 chrome 把 chromiumoxide 实际生成的命令行落盘，返回其 argv。
+    ///
+    /// 真实 Chromium 会因 root/平台差异不可用，但「最终命令行长什么样」是纯确定性的——
+    /// 本类 bug 的现场就在这一步：形参被 chromiumoxide 二次拼接后失真。
     #[cfg(unix)]
-    fn fake_chrome_argv(is_root: bool) -> Vec<String> {
+    fn fake_chrome_argv(is_root: bool, proxy: Option<&ProxyConfig>) -> Vec<String> {
         use std::io::Write as _;
         use std::os::unix::fs::PermissionsExt;
-        let dir = std::env::temp_dir().join(format!("hawkeye-fake-chrome-{}", std::process::id()));
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static SEQ: AtomicUsize = AtomicUsize::new(0);
+        let n = SEQ.fetch_add(1, Ordering::Relaxed);
+        let dir =
+            std::env::temp_dir().join(format!("hawkeye-fake-chrome-{}-{n}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let script = dir.join("fake-chrome.sh");
-        let out = dir.join(format!("argv-root-{is_root}.txt"));
-        let _ = std::fs::remove_file(&out);
+        let out = dir.join("argv.txt");
         let mut f = std::fs::File::create(&script).unwrap();
         writeln!(f, "#!/bin/sh").unwrap();
         writeln!(
@@ -797,7 +787,7 @@ mod tests {
         drop(f);
         std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
 
-        let cfg = build_browser_config(script, None, is_root).unwrap();
+        let cfg = build_browser_config(script, proxy, is_root).unwrap();
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -816,32 +806,70 @@ mod tests {
         })
     }
 
+    fn proxy(server: &str) -> ProxyConfig {
+        ProxyConfig {
+            server: server.to_string(),
+            username: None,
+            password: None,
+            bypass: None,
+        }
+    }
+
     #[cfg(unix)]
     #[test]
     fn test_root_config_passes_no_sandbox_flag() {
-        let root = fake_chrome_argv(true);
+        let root = fake_chrome_argv(true, None);
         assert!(
             root.iter().any(|a| a == "--no-sandbox"),
             "root 必须真的把 --no-sandbox 传到命令行，否则 zygote 拒绝启动；实际 argv：{root:?}"
         );
         assert!(root.iter().any(|a| a == "--disable-setuid-sandbox"));
 
-        let user = fake_chrome_argv(false);
+        let user = fake_chrome_argv(false, None);
         assert!(
             !user.iter().any(|a| a.contains("sandbox")),
             "非 root 应保留沙箱，不能无条件关沙箱；实际 argv：{user:?}"
         );
     }
 
+    #[cfg(unix)]
     #[test]
-    fn test_base_args_keeps_socks_proxy_without_userinfo() {
-        let proxy = ProxyConfig {
-            server: "socks5://user:pass@1.2.3.4:1080".to_string(),
-            username: None,
-            password: None,
-            bypass: None,
-        };
-        let args = base_chromium_args(Some(&proxy));
-        assert!(args.contains(&"--proxy-server=socks5://1.2.3.4:1080".to_string()));
+    fn test_headless_and_stealth_args_render_correctly() {
+        let argv = fake_chrome_argv(false, None);
+        // chromiumoxide 的 ArgsBuilder 会给每个形参补 `--`；形参自带前导 `--` 就会变成
+        // `----xxx` 而被 Chromium 忽略。这条断言是当初沙箱/无头/隐身三处的回归护栏。
+        assert!(
+            !argv.iter().any(|a| a.starts_with("----")),
+            "有形参被二次拼接（前导 -- 未去掉）：{argv:?}"
+        );
+        assert!(
+            argv.iter().any(|a| a == "--headless=new"),
+            "应显式启用新版无头模式：{argv:?}"
+        );
+        assert!(
+            argv.iter()
+                .any(|a| a == "--disable-blink-features=AutomationControlled"),
+            "应带上 AutomationControlled 关闭标记：{argv:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_proxy_args_render_correctly() {
+        let socks = fake_chrome_argv(false, Some(&proxy("socks5://user:pass@1.2.3.4:1080")));
+        assert!(
+            socks
+                .iter()
+                .any(|a| a == "--proxy-server=socks5://1.2.3.4:1080"),
+            "SOCKS 代理应剥掉 userinfo 后落到命令行：{socks:?}"
+        );
+        assert!(!socks.iter().any(|a| a.starts_with("----")), "{socks:?}");
+
+        let http = fake_chrome_argv(false, Some(&proxy("http://1.2.3.4:8080")));
+        assert!(
+            http.iter()
+                .any(|a| a == "--proxy-server=http://1.2.3.4:8080"),
+            "HTTP 代理应落到命令行：{http:?}"
+        );
     }
 }
