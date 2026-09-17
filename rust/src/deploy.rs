@@ -24,8 +24,8 @@ use async_trait::async_trait;
 
 use crate::config::{load_raw, parse_config};
 use crate::notify::redact;
-use crate::packaging::{build_package, PackageError, PLACEHOLDER_TOKEN};
-use crate::ssh::{shell_quote, validate_safe, SshConnection, SshError};
+use crate::packaging::{PLACEHOLDER_TOKEN, PackageError, build_package};
+use crate::ssh::{SshConnection, SshError, shell_quote, validate_safe};
 
 // ---- 常量 ----
 
@@ -66,7 +66,8 @@ pub struct ConnParams<'a> {
 }
 
 pub type BoxedRemoteOps<'a> = Box<dyn RemoteOps + 'a>;
-pub type MakeOpsFuture<'a> = Pin<Box<dyn Future<Output = Result<BoxedRemoteOps<'a>, SshError>> + 'a>>;
+pub type MakeOpsFuture<'a> =
+    Pin<Box<dyn Future<Output = Result<BoxedRemoteOps<'a>, SshError>> + 'a>>;
 pub type MakeOps<'a> = Box<dyn FnOnce(ConnParams<'a>) -> MakeOpsFuture<'a> + 'a>;
 
 /// 远端操作高层接口。
@@ -76,7 +77,11 @@ pub type MakeOps<'a> = Box<dyn FnOnce(ConnParams<'a>) -> MakeOpsFuture<'a> + 'a>
 #[async_trait(?Send)]
 pub trait RemoteOps {
     async fn probe_privilege(&self) -> Result<(), SshError>;
-    async fn probe_remote_config(&self, config_path: &str, placeholder: &str) -> Result<String, SshError>;
+    async fn probe_remote_config(
+        &self,
+        config_path: &str,
+        placeholder: &str,
+    ) -> Result<String, SshError>;
     async fn mktemp_remote_dir(&self) -> Result<String, SshError>;
     async fn upload_zip(&self, local_zip: &Path, remote_path: &str) -> Result<(), SshError>;
     async fn upload_config(&self, local_config: &Path, remote_path: &str) -> Result<(), SshError>;
@@ -97,14 +102,18 @@ pub trait RemoteOps {
     async fn cleanup_stage(&self, stage_dir: &str, keep_log: bool) -> Result<(), SshError>;
 }
 
+/// 面板回调的别名：`Box<dyn FnMut…>` 直接写进结构体字段会触发 type_complexity。
+pub type AskFn = Box<dyn FnMut(&str) -> String>;
+pub type EmitFn = Box<dyn FnMut(&str)>;
+
 /// 交互面板：ask / ask_secret / emit 三个回调统一承载。
 ///
 /// 用 RefCell 内部可变性：TOFU 确认闭包与编排主体的 emit 同时持有面板，
 /// 借用检查器无法表达这种「共享但串行」的用法。
 pub struct Console {
-    pub ask: RefCell<Box<dyn FnMut(&str) -> String>>,
-    pub ask_secret: RefCell<Box<dyn FnMut(&str) -> String>>,
-    pub emit: RefCell<Box<dyn FnMut(&str)>>,
+    pub ask: RefCell<AskFn>,
+    pub ask_secret: RefCell<AskFn>,
+    pub emit: RefCell<EmitFn>,
 }
 
 impl Console {
@@ -261,7 +270,9 @@ fn print_summary(
     console.emit("  sudo journalctl -u hawkeye.service -f");
     if !success && log_path.is_some() {
         console.emit("失败回退命令（如自动回滚未生效）：");
-        console.emit("  sudo mv /opt/hawkeye/hawkeye.old /opt/hawkeye/hawkeye    # 如果 hawkeye.old 还在");
+        console.emit(
+            "  sudo mv /opt/hawkeye/hawkeye.old /opt/hawkeye/hawkeye    # 如果 hawkeye.old 还在",
+        );
         console.emit("  sudo systemctl restart hawkeye.service");
     }
 }
@@ -279,7 +290,11 @@ fn build_launcher_script(
         Some(p) => format!("--config {} ", shell_quote(p)),
         None => String::new(),
     };
-    let overwrite_flag = if overwrite_config { "--overwrite-config " } else { "" };
+    let overwrite_flag = if overwrite_config {
+        "--overwrite-config "
+    } else {
+        ""
+    };
     format!(
         r#"#!/bin/bash
 set -e
@@ -322,13 +337,19 @@ pub struct DeployArgs {
     pub overwrite_config: bool,
 }
 
+/// 本机侧路径集合。与 [`DeployArgs`] 分开：那几项是命令行选项，这几个由运行环境
+/// （配置位置、项目根、dist 目录）决定，成组传递免得签名越过七参。
+pub struct DeployPaths<'a> {
+    pub config_path: &'a Path,
+    pub connection_file: &'a Path,
+    pub dist_dir: &'a Path,
+    pub packaging_root: &'a Path,
+}
+
 /// 编排一次部署；返回退出码（0 成功，1 失败，130 取消）。
 pub async fn run_deploy<'a>(
     args: &DeployArgs,
-    config_path: &Path,
-    connection_file: &Path,
-    dist_dir: &Path,
-    packaging_root: &Path,
+    paths: &DeployPaths<'_>,
     // 预构建二进制；None 时 build_package 自动 cargo build --release（测试传现成文件）。
     binary: Option<&Path>,
     console: &'a Console,
@@ -337,10 +358,13 @@ pub async fn run_deploy<'a>(
     console.emit("[HawkEye] 一键部署开始……");
 
     // 1. 读 .hawkeye-deploy.toml
-    let stored = match read_connection_file(connection_file) {
+    let stored = match read_connection_file(paths.connection_file) {
         Ok(s) => s,
         Err(e) => {
-            console.emit(&format!("读取 {} 失败：{e}", connection_file.display()));
+            console.emit(&format!(
+                "读取 {} 失败：{e}",
+                paths.connection_file.display()
+            ));
             return 1;
         }
     };
@@ -361,10 +385,16 @@ pub async fn run_deploy<'a>(
     }
 
     // 4. 写回 .hawkeye-deploy.toml（仅当本次新问到值）
-    if asked_new && !connection_file.exists() {
-        match write_connection_file(connection_file, &host, port, &user) {
-            Ok(()) => console.emit(&format!("已写入连接参数：{}", connection_file.display())),
-            Err(e) => console.emit(&format!("写入 {} 失败（仍继续部署）：{e}", connection_file.display())),
+    if asked_new && !paths.connection_file.exists() {
+        match write_connection_file(paths.connection_file, &host, port, &user) {
+            Ok(()) => console.emit(&format!(
+                "已写入连接参数：{}",
+                paths.connection_file.display()
+            )),
+            Err(e) => console.emit(&format!(
+                "写入 {} 失败（仍继续部署）：{e}",
+                paths.connection_file.display()
+            )),
         }
     }
 
@@ -404,7 +434,10 @@ pub async fn run_deploy<'a>(
     }
 
     // 8. 前置探测远端 config.toml 三态
-    let state = match ops.probe_remote_config(REMOTE_CONFIG_PATH, PLACEHOLDER_TOKEN).await {
+    let state = match ops
+        .probe_remote_config(REMOTE_CONFIG_PATH, PLACEHOLDER_TOKEN)
+        .await
+    {
         Ok(s) => s,
         Err(e) => {
             console.emit(&format!("远端探测失败：{e}"));
@@ -422,21 +455,21 @@ pub async fn run_deploy<'a>(
     // 9. 仅当本机配置本次会被采用：parse_config + 占位符硬闸门
     let mut local_config_for_upload: Option<PathBuf> = None;
     if adopt_local_config {
-        if !config_path.exists() {
+        if !paths.config_path.exists() {
             console.emit(&format!(
                 "本机配置 {} 不存在。请先运行 `hawkeye init`，或确认服务器是否已配好。",
-                config_path.display()
+                paths.config_path.display()
             ));
             return 1;
         }
-        match validate_local_config(config_path) {
+        match validate_local_config(paths.config_path) {
             Ok(bot_token) => secrets.push(bot_token),
             Err(e) => {
                 console.emit(&e);
                 return 1;
             }
         }
-        local_config_for_upload = Some(config_path.to_path_buf());
+        local_config_for_upload = Some(paths.config_path.to_path_buf());
     } else {
         console.emit(
             "服务器上已有真实 config.toml，本次保留不覆盖。\
@@ -446,7 +479,7 @@ pub async fn run_deploy<'a>(
 
     // 10. 打包（白名单 + 泄漏兜底；中止即退 1）
     console.emit("[HawkEye] 打包中……");
-    let archive = match build_package(packaging_root, Some(dist_dir), binary) {
+    let archive = match build_package(paths.packaging_root, Some(paths.dist_dir), binary) {
         Ok(a) => a,
         Err(PackageError(e)) => {
             console.emit(&format!("打包失败：{e}"));
@@ -493,7 +526,12 @@ pub async fn run_deploy<'a>(
 
     // 14. 远端后台 install（launcher 上传 + 跑 + 读 pid）
     let handles = match ops
-        .run_background_install(&stage_dir, &pkg_name, remote_config.as_deref(), args.overwrite_config)
+        .run_background_install(
+            &stage_dir,
+            &pkg_name,
+            remote_config.as_deref(),
+            args.overwrite_config,
+        )
         .await
     {
         Ok(h) => h,
@@ -519,14 +557,27 @@ pub async fn run_deploy<'a>(
         Ok(rc) => rc,
         Err(e) => {
             console.emit(&e.0);
-            print_summary(console, false, Some(&handles.log_path), Some(config_path));
+            print_summary(
+                console,
+                false,
+                Some(&handles.log_path),
+                Some(paths.config_path),
+            );
             let _ = ops.cleanup_stage(&stage_dir, true).await;
             return 1;
         }
     };
     if rc != 0 {
-        console.emit(&format!("远端 install 退出码 {rc}；请查看日志：{}", handles.log_path));
-        print_summary(console, false, Some(&handles.log_path), Some(config_path));
+        console.emit(&format!(
+            "远端 install 退出码 {rc}；请查看日志：{}",
+            handles.log_path
+        ));
+        print_summary(
+            console,
+            false,
+            Some(&handles.log_path),
+            Some(paths.config_path),
+        );
         let _ = ops.cleanup_stage(&stage_dir, true).await;
         return 1;
     }
@@ -539,7 +590,12 @@ pub async fn run_deploy<'a>(
     };
     if !ok {
         console.emit(&format!("分层健康检查失败：{msg}"));
-        print_summary(console, false, Some(&handles.log_path), Some(config_path));
+        print_summary(
+            console,
+            false,
+            Some(&handles.log_path),
+            Some(paths.config_path),
+        );
         let _ = ops.cleanup_stage(&stage_dir, true).await;
         return 1;
     }
@@ -548,7 +604,12 @@ pub async fn run_deploy<'a>(
     // 17. 清理（保留 install.log）
     let _ = ops.cleanup_stage(&stage_dir, true).await;
 
-    print_summary(console, true, Some(&handles.log_path), Some(config_path));
+    print_summary(
+        console,
+        true,
+        Some(&handles.log_path),
+        Some(paths.config_path),
+    );
     0
 }
 
@@ -556,7 +617,10 @@ pub async fn run_deploy<'a>(
 fn default_confirm(console: &Console) -> impl FnMut(&str) -> bool + '_ {
     move |prompt: &str| {
         console.emit(prompt);
-        let answer = console.ask("  接受？(y/N，回车拒绝)：").trim().to_lowercase();
+        let answer = console
+            .ask("  接受？(y/N，回车拒绝)：")
+            .trim()
+            .to_lowercase();
         ["y", "yes", "是", "确认", "确定", "保存"].contains(&answer.as_str())
     }
 }
@@ -594,7 +658,11 @@ impl RemoteOps for DefaultRemoteOps {
         self.conn.probe_privilege(&self.password).await
     }
 
-    async fn probe_remote_config(&self, config_path: &str, placeholder: &str) -> Result<String, SshError> {
+    async fn probe_remote_config(
+        &self,
+        config_path: &str,
+        placeholder: &str,
+    ) -> Result<String, SshError> {
         let r = self
             .conn
             .run(&format!("test -f {}", shell_quote(config_path)))
@@ -623,11 +691,16 @@ impl RemoteOps for DefaultRemoteOps {
             .run("mktemp -d /var/tmp/hawkeye-deploy.XXXXXXXXXX")
             .await?;
         if r.exit_status != 0 {
-            return Err(SshError::Other(format!("mktemp -d 失败：{}", r.stderr.trim())));
+            return Err(SshError::Other(format!(
+                "mktemp -d 失败：{}",
+                r.stderr.trim()
+            )));
         }
         let path = r.stdout.trim().to_string();
         if !path.starts_with("/var/tmp/hawkeye-deploy.") {
-            return Err(SshError::Other(format!("mktemp 返回的路径不符合预期：{path:?}")));
+            return Err(SshError::Other(format!(
+                "mktemp 返回的路径不符合预期：{path:?}"
+            )));
         }
         Ok(path)
     }
@@ -656,7 +729,8 @@ impl RemoteOps for DefaultRemoteOps {
         overwrite_config: bool,
     ) -> Result<InstallHandles, SshError> {
         // 上传 launcher；密码经 stdin 一次性喂入（不分配 pty）。
-        let launcher = build_launcher_script(stage_dir, pkg_name, config_remote_path, overwrite_config);
+        let launcher =
+            build_launcher_script(stage_dir, pkg_name, config_remote_path, overwrite_config);
         let launcher_remote = format!("{stage_dir}/deploy-launcher.sh");
         self.conn
             .upload_part_then_rename(&launcher_remote, launcher.as_bytes(), Some(0o700), false)
@@ -664,19 +738,29 @@ impl RemoteOps for DefaultRemoteOps {
 
         let r = self
             .conn
-            .run_with_stdin(&format!("bash {}", shell_quote(&launcher_remote)), &format!("{}\n", self.password))
+            .run_with_stdin(
+                &format!("bash {}", shell_quote(&launcher_remote)),
+                &format!("{}\n", self.password),
+            )
             .await?;
         if r.exit_status != 0 {
             let safe_stderr = redact(r.stderr.trim(), &[&self.password]);
             return Err(SshError::Other(format!(
                 "launcher 退出码 {}；stderr: {}",
                 r.exit_status,
-                if safe_stderr.is_empty() { "(无)" } else { &safe_stderr }
+                if safe_stderr.is_empty() {
+                    "(无)"
+                } else {
+                    &safe_stderr
+                }
             )));
         }
 
         // 读 install.pid。
-        let pid_bytes = self.conn.read_remote_file(&format!("{stage_dir}/install.pid")).await?;
+        let pid_bytes = self
+            .conn
+            .read_remote_file(&format!("{stage_dir}/install.pid"))
+            .await?;
         let pid_text = String::from_utf8_lossy(&pid_bytes).trim().to_string();
         let pid: u32 = pid_text
             .parse()
@@ -700,13 +784,13 @@ impl RemoteOps for DefaultRemoteOps {
         let mut last_pos: usize = 0;
         loop {
             // 1) 读日志新增内容
-            if let Ok(data) = self.conn.read_remote_file(&handles.log_path).await {
-                if data.len() > last_pos {
-                    let text = String::from_utf8_lossy(&data[last_pos..]).into_owned();
-                    last_pos = data.len();
-                    for line in text.lines() {
-                        on_line(line);
-                    }
+            if let Ok(data) = self.conn.read_remote_file(&handles.log_path).await
+                && data.len() > last_pos
+            {
+                let text = String::from_utf8_lossy(&data[last_pos..]).into_owned();
+                last_pos = data.len();
+                for line in text.lines() {
+                    on_line(line);
                 }
             }
 
@@ -768,7 +852,10 @@ impl RemoteOps for DefaultRemoteOps {
             ))
             .await?;
         if r.exit_status == 0 {
-            return Ok((true, "服务已启用，配置文件仍是模板（is-active 不要求）".to_string()));
+            return Ok((
+                true,
+                "服务已启用，配置文件仍是模板（is-active 不要求）".to_string(),
+            ));
         }
 
         // 3) 已配置：is-active 必须 active
@@ -784,13 +871,17 @@ impl RemoteOps for DefaultRemoteOps {
         // 4) NRestarts 观察窗内不增长
         let r1 = self
             .conn
-            .run(&format!("systemctl show -p NRestarts --value {REMOTE_SERVICE_NAME}"))
+            .run(&format!(
+                "systemctl show -p NRestarts --value {REMOTE_SERVICE_NAME}"
+            ))
             .await?;
         let n1 = r1.stdout.trim().to_string();
         tokio::time::sleep(HEALTH_RESTART_OBSERVE_SECONDS).await;
         let r2 = self
             .conn
-            .run(&format!("systemctl show -p NRestarts --value {REMOTE_SERVICE_NAME}"))
+            .run(&format!(
+                "systemctl show -p NRestarts --value {REMOTE_SERVICE_NAME}"
+            ))
             .await?;
         let n2 = r2.stdout.trim().to_string();
         if n1 != n2 {
@@ -800,7 +891,9 @@ impl RemoteOps for DefaultRemoteOps {
         // 5) ExecMainStatus=2 单独给诊断（RestartPreventExitStatus=2 让它停在 failed）
         let r3 = self
             .conn
-            .run(&format!("systemctl show -p ExecMainStatus --value {REMOTE_SERVICE_NAME}"))
+            .run(&format!(
+                "systemctl show -p ExecMainStatus --value {REMOTE_SERVICE_NAME}"
+            ))
             .await?;
         if r3.stdout.trim() == "2" {
             return Ok((
@@ -816,7 +909,10 @@ impl RemoteOps for DefaultRemoteOps {
 
     async fn cleanup_stage(&self, stage_dir: &str, keep_log: bool) -> Result<(), SshError> {
         // 删远端暂存目录里的内容；保留 install.log。
-        let r = self.conn.run(&format!("ls -1 {}", shell_quote(stage_dir))).await?;
+        let r = self
+            .conn
+            .run(&format!("ls -1 {}", shell_quote(stage_dir)))
+            .await?;
         if r.exit_status != 0 {
             return Ok(());
         }
@@ -830,7 +926,10 @@ impl RemoteOps for DefaultRemoteOps {
             }
             let _ = self
                 .conn
-                .run(&format!("rm -rf {}", shell_quote(&format!("{stage_dir}/{name}"))))
+                .run(&format!(
+                    "rm -rf {}",
+                    shell_quote(&format!("{stage_dir}/{name}"))
+                ))
                 .await;
         }
         Ok(())
@@ -847,8 +946,14 @@ mod tests {
     #[test]
     fn test_coerce_port_handles_various_inputs() {
         assert_eq!(coerce_port(Some(&toml::Value::Integer(22))), Some(22));
-        assert_eq!(coerce_port(Some(&toml::Value::String("2222".into()))), Some(2222));
-        assert_eq!(coerce_port(Some(&toml::Value::String("  80  ".into()))), Some(80));
+        assert_eq!(
+            coerce_port(Some(&toml::Value::String("2222".into()))),
+            Some(2222)
+        );
+        assert_eq!(
+            coerce_port(Some(&toml::Value::String("  80  ".into()))),
+            Some(80)
+        );
         assert_eq!(coerce_port(None), None);
         assert_eq!(coerce_port(Some(&toml::Value::String("abc".into()))), None);
         assert_eq!(coerce_port(Some(&toml::Value::Float(1.5))), None);
@@ -926,7 +1031,12 @@ mod tests {
 
     #[test]
     fn test_build_launcher_script() {
-        let s = build_launcher_script("/var/tmp/hawkeye-deploy.ABC", "hawkeye-0.1.0-x", None, false);
+        let s = build_launcher_script(
+            "/var/tmp/hawkeye-deploy.ABC",
+            "hawkeye-0.1.0-x",
+            None,
+            false,
+        );
         assert!(s.contains("D=/var/tmp/hawkeye-deploy.ABC"));
         assert!(s.contains("PKG=hawkeye-0.1.0-x"));
         assert!(s.contains("install.sh\" install"));
@@ -934,13 +1044,11 @@ mod tests {
         assert!(!s.contains("--overwrite-config"));
         assert!(s.contains("echo $rc > \"$D/.rc.part\""), "完成信号走 .rc");
 
-        let s = build_launcher_script(
-            "/var/tmp/d",
-            "p",
-            Some("/var/tmp/d/config.toml"),
-            true,
+        let s = build_launcher_script("/var/tmp/d", "p", Some("/var/tmp/d/config.toml"), true);
+        assert!(
+            s.contains("--config '/var/tmp/d/config.toml'"),
+            "路径单引号包裹：{s}"
         );
-        assert!(s.contains("--config '/var/tmp/d/config.toml'"), "路径单引号包裹：{s}");
         assert!(s.contains("--overwrite-config"));
     }
 
@@ -952,11 +1060,19 @@ mod tests {
         let p = dir.join(".hawkeye-deploy.toml");
         write_connection_file(&p, "vps.example.com", 2222, "root").unwrap();
         let stored = read_connection_file(&p).unwrap();
-        assert_eq!(stored.get("host").and_then(|v| v.as_str()), Some("vps.example.com"));
+        assert_eq!(
+            stored.get("host").and_then(|v| v.as_str()),
+            Some("vps.example.com")
+        );
         assert_eq!(stored.get("port").and_then(|v| v.as_integer()), Some(2222));
         assert_eq!(stored.get("user").and_then(|v| v.as_str()), Some("root"));
         // 不含密码。
-        assert!(std::fs::read_to_string(&p).unwrap().find("password").is_none());
+        assert!(
+            std::fs::read_to_string(&p)
+                .unwrap()
+                .find("password")
+                .is_none()
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1005,7 +1121,11 @@ mod tests {
             Ok(())
         }
 
-        async fn probe_remote_config(&self, _config_path: &str, _placeholder: &str) -> Result<String, SshError> {
+        async fn probe_remote_config(
+            &self,
+            _config_path: &str,
+            _placeholder: &str,
+        ) -> Result<String, SshError> {
             self.record("probe_remote_config");
             Ok(self.config_state.to_string())
         }
@@ -1016,11 +1136,19 @@ mod tests {
         }
 
         async fn upload_zip(&self, local_zip: &Path, remote_path: &str) -> Result<(), SshError> {
-            self.record(&format!("upload_zip:{}:{}", local_zip.display(), remote_path));
+            self.record(&format!(
+                "upload_zip:{}:{}",
+                local_zip.display(),
+                remote_path
+            ));
             Ok(())
         }
 
-        async fn upload_config(&self, _local_config: &Path, remote_path: &str) -> Result<(), SshError> {
+        async fn upload_config(
+            &self,
+            _local_config: &Path,
+            remote_path: &str,
+        ) -> Result<(), SshError> {
             self.record(&format!("upload_config:{remote_path}"));
             Ok(())
         }
@@ -1078,7 +1206,11 @@ mod tests {
             (**self).probe_privilege().await
         }
 
-        async fn probe_remote_config(&self, config_path: &str, placeholder: &str) -> Result<String, SshError> {
+        async fn probe_remote_config(
+            &self,
+            config_path: &str,
+            placeholder: &str,
+        ) -> Result<String, SshError> {
             (**self).probe_remote_config(config_path, placeholder).await
         }
 
@@ -1090,7 +1222,11 @@ mod tests {
             (**self).upload_zip(local_zip, remote_path).await
         }
 
-        async fn upload_config(&self, local_config: &Path, remote_path: &str) -> Result<(), SshError> {
+        async fn upload_config(
+            &self,
+            local_config: &Path,
+            remote_path: &str,
+        ) -> Result<(), SshError> {
             (**self).upload_config(local_config, remote_path).await
         }
 
@@ -1101,7 +1237,9 @@ mod tests {
             config_remote_path: Option<&str>,
             overwrite_config: bool,
         ) -> Result<InstallHandles, SshError> {
-            (**self).run_background_install(stage_dir, pkg_name, config_remote_path, overwrite_config).await
+            (**self)
+                .run_background_install(stage_dir, pkg_name, config_remote_path, overwrite_config)
+                .await
         }
 
         async fn tail_log_until_done(
@@ -1110,7 +1248,9 @@ mod tests {
             max_seconds: f64,
             on_line: &mut dyn for<'s> FnMut(&'s str),
         ) -> Result<i32, DeployError> {
-            (**self).tail_log_until_done(handles, max_seconds, on_line).await
+            (**self)
+                .tail_log_until_done(handles, max_seconds, on_line)
+                .await
         }
 
         async fn layered_health_check(&self) -> Result<(bool, String), SshError> {
@@ -1133,10 +1273,11 @@ mod tests {
     }
 
     fn fixture(tag: &str) -> Fixture {
-        let dir = std::env::temp_dir().join(format!("hawkeye_dep_test_{}_{}", std::process::id(), tag));
+        let dir =
+            std::env::temp_dir().join(format!("hawkeye_dep_test_{}_{}", std::process::id(), tag));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("rust")).unwrap();
-        // 项目根：rust/Cargo.toml + config.example.toml + 假二进制。
+        // 项目根：rust/Cargo.toml + config.example.toml + install.sh + 假二进制。
         std::fs::write(
             dir.join("rust").join("Cargo.toml"),
             "[package]\nname = \"hawkeye\"\nversion = \"0.1.0\"\n",
@@ -1147,6 +1288,8 @@ mod tests {
             "[telegram]\nbot_token = \"123456:ABC-your-bot-token\"\nchat_id = \"1\"\n",
         )
         .unwrap();
+        // install.sh 是打包根的必备文件（唯一一份安装入口）。
+        std::fs::write(dir.join("install.sh"), "#!/bin/sh\n").unwrap();
         let binary = dir.join("fake-bin");
         std::fs::write(&binary, b"fake").unwrap();
         // 本机真实配置。
@@ -1177,24 +1320,18 @@ mod tests {
         let config_path = f.dir.join("config.toml");
         let connection_file = f.dir.join(".hawkeye-deploy.toml");
         let dist_dir = f.dir.join("dist");
+        let paths = DeployPaths {
+            config_path: &config_path,
+            connection_file: &connection_file,
+            dist_dir: &dist_dir,
+            packaging_root: &f.dir,
+        };
         let remote_for_factory = std::rc::Rc::clone(&remote);
         let make_ops: MakeOps<'_> = Box::new(move |_params: ConnParams<'_>| {
             let ops = remote_for_factory;
-            Box::pin(async move {
-                Ok(Box::new(ops) as BoxedRemoteOps<'_>)
-            })
+            Box::pin(async move { Ok(Box::new(ops) as BoxedRemoteOps<'_>) })
         });
-        let code = run_deploy(
-            args,
-            &config_path,
-            &connection_file,
-            &dist_dir,
-            &f.dir,
-            Some(&f.binary),
-            &f.console,
-            make_ops,
-        )
-        .await;
+        let code = run_deploy(args, &paths, Some(&f.binary), &f.console, make_ops).await;
         (code, f.emitted.borrow().clone())
     }
 
@@ -1227,12 +1364,26 @@ mod tests {
             calls[3]
         );
         let _ = calls;
-        assert_eq!(calls[4], "upload_config:/var/tmp/hawkeye-deploy.ABC123/config.toml");
-        assert!(calls[5].starts_with("run_background_install:/var/tmp/hawkeye-deploy.ABC123:hawkeye-0.1.0"), "{}", calls[5]);
+        assert_eq!(
+            calls[4],
+            "upload_config:/var/tmp/hawkeye-deploy.ABC123/config.toml"
+        );
+        assert!(
+            calls[5]
+                .starts_with("run_background_install:/var/tmp/hawkeye-deploy.ABC123:hawkeye-0.1.0"),
+            "{}",
+            calls[5]
+        );
         assert_eq!(calls[6], "tail_log_until_done");
         assert_eq!(calls[7], "layered_health_check");
-        assert_eq!(calls[8], "cleanup_stage:/var/tmp/hawkeye-deploy.ABC123:true");
-        assert!(emitted.iter().any(|l| l.contains("部署完成")), "{emitted:?}");
+        assert_eq!(
+            calls[8],
+            "cleanup_stage:/var/tmp/hawkeye-deploy.ABC123:true"
+        );
+        assert!(
+            emitted.iter().any(|l| l.contains("部署完成")),
+            "{emitted:?}"
+        );
     }
 
     #[tokio::test]
@@ -1243,7 +1394,10 @@ mod tests {
         let remote = std::rc::Rc::new(remote);
         let (code, emitted) = run(&f, &default_args(), remote.clone()).await;
         assert_eq!(code, 1);
-        assert!(emitted.iter().any(|l| l.contains("远端提权探测失败")), "{emitted:?}");
+        assert!(
+            emitted.iter().any(|l| l.contains("远端提权探测失败")),
+            "{emitted:?}"
+        );
         // 早失败：探权限之后什么都不做。
         assert_eq!(remote.calls(), vec!["probe_privilege"]);
     }
@@ -1260,7 +1414,11 @@ mod tests {
         assert_eq!(code, 1);
         assert!(emitted.iter().any(|l| l.contains("占位符")), "{emitted:?}");
         // 占位符闸门在打包之前——mktemp 之后的步骤都不该发生。
-        assert!(!f.remote.calls().iter().any(|c| c.starts_with("upload_zip")), "{:?}", f.remote.calls());
+        assert!(
+            !f.remote.calls().iter().any(|c| c.starts_with("upload_zip")),
+            "{:?}",
+            f.remote.calls()
+        );
     }
 
     #[tokio::test]
@@ -1271,13 +1429,24 @@ mod tests {
         let remote = std::rc::Rc::new(remote);
         let (code, emitted) = run(&f, &default_args(), remote.clone()).await;
         assert_eq!(code, 0);
-        assert!(emitted.iter().any(|l| l.contains("保留不覆盖")), "{emitted:?}");
-        assert!(!remote.calls().iter().any(|c| c.starts_with("upload_config")), "真实配置未要求覆盖时不传");
+        assert!(
+            emitted.iter().any(|l| l.contains("保留不覆盖")),
+            "{emitted:?}"
+        );
+        assert!(
+            !remote
+                .calls()
+                .iter()
+                .any(|c| c.starts_with("upload_config")),
+            "真实配置未要求覆盖时不传"
+        );
         // 后台安装不带 config 参数。
-        assert!(remote
-            .calls()
-            .iter()
-            .any(|c| c.contains("run_background_install") && c.contains(":None:")));
+        assert!(
+            remote
+                .calls()
+                .iter()
+                .any(|c| c.contains("run_background_install") && c.contains(":None:"))
+        );
     }
 
     #[tokio::test]
@@ -1290,11 +1459,18 @@ mod tests {
         args.overwrite_config = true;
         let (code, _) = run(&f, &args, remote.clone()).await;
         assert_eq!(code, 0);
-        assert!(remote.calls().iter().any(|c| c.starts_with("upload_config")));
-        assert!(remote
-            .calls()
-            .iter()
-            .any(|c| c.contains("run_background_install") && c.contains("true")));
+        assert!(
+            remote
+                .calls()
+                .iter()
+                .any(|c| c.starts_with("upload_config"))
+        );
+        assert!(
+            remote
+                .calls()
+                .iter()
+                .any(|c| c.contains("run_background_install") && c.contains("true"))
+        );
     }
 
     #[tokio::test]
@@ -1305,10 +1481,21 @@ mod tests {
         let remote = std::rc::Rc::new(remote);
         let (code, emitted) = run(&f, &default_args(), remote.clone()).await;
         assert_eq!(code, 1);
-        assert!(emitted.iter().any(|l| l.contains("退出码 3")), "{emitted:?}");
-        assert!(emitted.iter().any(|l| l.contains("部署失败")), "{emitted:?}");
+        assert!(
+            emitted.iter().any(|l| l.contains("退出码 3")),
+            "{emitted:?}"
+        );
+        assert!(
+            emitted.iter().any(|l| l.contains("部署失败")),
+            "{emitted:?}"
+        );
         // 失败路径也要清理（保留日志）。
-        assert!(remote.calls().iter().any(|c| c.contains("cleanup_stage") && c.ends_with(":true")));
+        assert!(
+            remote
+                .calls()
+                .iter()
+                .any(|c| c.contains("cleanup_stage") && c.ends_with(":true"))
+        );
     }
 
     #[tokio::test]
@@ -1319,7 +1506,10 @@ mod tests {
         let remote = std::rc::Rc::new(remote);
         let (code, emitted) = run(&f, &default_args(), remote.clone()).await;
         assert_eq!(code, 1);
-        assert!(emitted.iter().any(|l| l.contains("服务未运行")), "{emitted:?}");
+        assert!(
+            emitted.iter().any(|l| l.contains("服务未运行")),
+            "{emitted:?}"
+        );
     }
 
     #[tokio::test]
@@ -1347,8 +1537,14 @@ mod tests {
         let (code, emitted) = run(&f, &default_args(), remote).await;
         assert_eq!(code, 0);
         let joined = emitted.join("\n");
-        assert!(!joined.contains("ssh-password"), "密码不得明文出现：{joined}");
-        assert!(!joined.contains("8428922140:AA-real-token"), "token 不得明文出现");
+        assert!(
+            !joined.contains("ssh-password"),
+            "密码不得明文出现：{joined}"
+        );
+        assert!(
+            !joined.contains("8428922140:AA-real-token"),
+            "token 不得明文出现"
+        );
         assert!(joined.contains("正常行"));
         assert!(joined.contains("<REDACTED>"));
     }
@@ -1368,18 +1564,18 @@ mod tests {
     async fn test_empty_password_rejected() {
         let f = fixture("nopw");
         let console = Console::new(|_| String::new(), |_| String::new(), |_| {});
-        let make_ops: MakeOps<'_> = Box::new(|_p: ConnParams<'_>| Box::pin(async { unreachable!() }));
-        let code = run_deploy(
-            &default_args(),
-            &f.dir.join("config.toml"),
-            &f.dir.join(".hawkeye-deploy.toml"),
-            &f.dir.join("dist"),
-            &f.dir,
-            Some(&f.binary),
-            &console,
-            make_ops,
-        )
-        .await;
+        let make_ops: MakeOps<'_> =
+            Box::new(|_p: ConnParams<'_>| Box::pin(async { unreachable!() }));
+        let config_path = f.dir.join("config.toml");
+        let connection_file = f.dir.join(".hawkeye-deploy.toml");
+        let dist_dir = f.dir.join("dist");
+        let paths = DeployPaths {
+            config_path: &config_path,
+            connection_file: &connection_file,
+            dist_dir: &dist_dir,
+            packaging_root: &f.dir,
+        };
+        let code = run_deploy(&default_args(), &paths, Some(&f.binary), &console, make_ops).await;
         assert_eq!(code, 1);
     }
 
@@ -1390,15 +1586,26 @@ mod tests {
         std::fs::remove_file(f.dir.join("config.example.toml")).unwrap();
         let (code, emitted) = run(&f, &default_args(), f.remote.clone()).await;
         assert_eq!(code, 1);
-        assert!(emitted.iter().any(|l| l.contains("打包失败")), "{emitted:?}");
-        assert!(!f.remote.calls().iter().any(|c| c.starts_with("run_background_install")));
+        assert!(
+            emitted.iter().any(|l| l.contains("打包失败")),
+            "{emitted:?}"
+        );
+        assert!(
+            !f.remote
+                .calls()
+                .iter()
+                .any(|c| c.starts_with("run_background_install"))
+        );
     }
 
     #[tokio::test]
     async fn test_connection_params_written_back_when_asked() {
         // CLI 未给 host/user 且连接文件不存在 → 交互问出后写回（不含密码）。
         let f = fixture("writeback");
-        let answers = std::rc::Rc::new(RefCell::new(vec!["vps9.example.com".to_string(), "root9".to_string()]));
+        let answers = std::rc::Rc::new(RefCell::new(vec![
+            "vps9.example.com".to_string(),
+            "root9".to_string(),
+        ]));
         let answers_for_ask = std::rc::Rc::clone(&answers);
         let console = Console::new(
             move |p: &str| {
@@ -1418,21 +1625,27 @@ mod tests {
             Box::pin(async move { Ok(Box::new(ops) as BoxedRemoteOps<'_>) })
         });
         let args = DeployArgs::default();
-        let code = run_deploy(
-            &args,
-            &f.dir.join("config.toml"),
-            &f.dir.join(".hawkeye-deploy.toml"),
-            &f.dir.join("dist"),
-            &f.dir,
-            Some(&f.binary),
-            &console,
-            make_ops,
-        )
-        .await;
+        let config_path = f.dir.join("config.toml");
+        let connection_file = f.dir.join(".hawkeye-deploy.toml");
+        let dist_dir = f.dir.join("dist");
+        let paths = DeployPaths {
+            config_path: &config_path,
+            connection_file: &connection_file,
+            dist_dir: &dist_dir,
+            packaging_root: &f.dir,
+        };
+        let code = run_deploy(&args, &paths, Some(&f.binary), &console, make_ops).await;
         assert_eq!(code, 0);
         let stored = read_connection_file(&f.dir.join(".hawkeye-deploy.toml")).unwrap();
-        assert_eq!(stored.get("host").and_then(|v| v.as_str()), Some("vps9.example.com"));
+        assert_eq!(
+            stored.get("host").and_then(|v| v.as_str()),
+            Some("vps9.example.com")
+        );
         assert_eq!(stored.get("user").and_then(|v| v.as_str()), Some("root9"));
-        assert!(!std::fs::read_to_string(f.dir.join(".hawkeye-deploy.toml")).unwrap().contains("ssh-password"));
+        assert!(
+            !std::fs::read_to_string(f.dir.join(".hawkeye-deploy.toml"))
+                .unwrap()
+                .contains("ssh-password")
+        );
     }
 }

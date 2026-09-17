@@ -25,7 +25,8 @@ pub struct ExtractResult {
 /// 等元素挂载（attached）：在超时窗口内以 100ms 间隔轮询，可被提前打断。
 async fn wait_attached(page: &Page, selector_js: &str, timeout: Duration) -> bool {
     let deadline = tokio::time::Instant::now() + timeout;
-    let expr = format!("(()=>{{const els={selector_js};return els&&els.length>0?els[0]:els||null}})()");
+    let expr =
+        format!("(()=>{{const els={selector_js};return els&&els.length>0?els[0]:els||null}})()");
     loop {
         let found = page
             .evaluate_expression(expr.clone())
@@ -88,26 +89,42 @@ async fn eval_string(page: &Page, expr: &str) -> Option<String> {
 ///
 /// 文本模式（element.js 缺省）：等元素 attached，取 innerText（空时 textContent 兜底），
 /// 经 normalize_text 归一化。JS 模式：先等元素 attached，再对元素求值 JS 表达式。
-pub async fn extract_text(page: &Page, element: &MonitoredElement, timeout: Duration) -> ExtractResult {
+pub async fn extract_text(
+    page: &Page,
+    element: &MonitoredElement,
+    timeout: Duration,
+) -> ExtractResult {
     let idx = element.nth.unwrap_or(0);
     let sel_expr = all_selector_expr(&element.selector, element.effective_selector_type());
 
     // 等首项挂载（domcontentloaded 后 JS 渲染元素可能还没挂载）。
-    if !wait_attached(page, &any_selector_expr(&element.selector, element.effective_selector_type()), timeout).await {
+    if !wait_attached(
+        page,
+        &any_selector_expr(&element.selector, element.effective_selector_type()),
+        timeout,
+    )
+    .await
+    {
         let title = page.get_title().await.ok().flatten().unwrap_or_default();
         let reason = if title.is_empty() {
             "选择器未匹配到元素".to_string()
         } else {
             format!("选择器未匹配到元素（页面标题：{title:?}，可能是反爬挑战页）")
         };
-        return ExtractResult { value: None, reason: Some(reason) };
+        return ExtractResult {
+            value: None,
+            reason: Some(reason),
+        };
     }
 
-    let nth_expr = format!("(()=>{{const els={sel_expr};return els.length>{idx}?els[{idx}]:null}})()");
+    let nth_expr =
+        format!("(()=>{{const els={sel_expr};return els.length>{idx}?els[{idx}]:null}})()");
 
     if let Some(js) = &element.js {
         // JS 模式：把元素作为参数求值。表达式的 this 是元素；兼容 (el) => ... 形式。
-        let wrapped = format!("(()=>{{const el={nth_expr};if(!el)return null;const fn={js};return typeof fn==='function'?fn.call(el,el):fn}})()");
+        let wrapped = format!(
+            "(()=>{{const el={nth_expr};if(!el)return null;const fn={js};return typeof fn==='function'?fn.call(el,el):fn}})()"
+        );
         match page.evaluate_expression(wrapped).await {
             Ok(r) => match r.into_value::<serde_json::Value>() {
                 Ok(serde_json::Value::Null) => {
@@ -153,7 +170,9 @@ pub async fn extract_text(page: &Page, element: &MonitoredElement, timeout: Dura
         },
         Some(t) if t.is_empty() => ExtractResult {
             value: Some(String::new()),
-            reason: Some("选择器匹配到元素，但其文本为空（多半指向了纯装饰节点，试试上一级）".to_string()),
+            reason: Some(
+                "选择器匹配到元素，但其文本为空（多半指向了纯装饰节点，试试上一级）".to_string(),
+            ),
         },
         Some(t) => ExtractResult {
             value: Some(normalize_text(&t)),
@@ -181,19 +200,29 @@ pub(crate) fn extract_id(href: &str, pattern: Option<&regex::Regex>) -> Option<S
     if path.is_empty() {
         return None;
     }
-    path.rsplit('/').next().filter(|s| !s.is_empty()).map(|s| s.to_string())
+    path.rsplit('/')
+        .next()
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string())
 }
 
 /// 提取列表页每个帖子的 (ID, 标题, 绝对 URL)。
 ///
 /// 缺 href 或提取不到 ID 的链接跳过；选择器无匹配时返回空列表，交由上层归入失败路径。
-pub async fn extract_list_items(page: &Page, watch: &WatchTarget, timeout: Duration) -> Vec<ListItem> {
+pub async fn extract_list_items(
+    page: &Page,
+    watch: &WatchTarget,
+    timeout: Duration,
+) -> Vec<ListItem> {
     let any_expr = any_selector_expr(&watch.link_selector, watch.effective_selector_type());
     if !wait_attached(page, &any_expr, timeout).await {
         return Vec::new();
     }
 
-    let pattern = watch.id_pattern.as_deref().and_then(|p| regex::Regex::new(p).ok());
+    let pattern = watch
+        .id_pattern
+        .as_deref()
+        .and_then(|p| regex::Regex::new(p).ok());
     let base = url::Url::parse(&watch.url).ok();
 
     let items_expr = all_selector_expr(&watch.link_selector, watch.effective_selector_type());
@@ -201,10 +230,7 @@ pub async fn extract_list_items(page: &Page, watch: &WatchTarget, timeout: Durat
     let expr = format!(
         "(()=>{{const els={items_expr};return els.map(a=>({{href:a.getAttribute('href')||'',text:(a.innerText&&a.innerText.trim())?a.innerText:(a.textContent||'')}}))}})()"
     );
-    let raw: Vec<serde_json::Value> = match page
-        .evaluate_expression(expr)
-        .await
-    {
+    let raw: Vec<serde_json::Value> = match page.evaluate_expression(expr).await {
         Ok(r) => r.into_value().unwrap_or_default(),
         Err(_) => return Vec::new(),
     };
@@ -218,7 +244,11 @@ pub async fn extract_list_items(page: &Page, watch: &WatchTarget, timeout: Durat
             continue;
         }
         let Some(post_id) = extract_id(href, pattern.as_ref()) else {
-            tracing::debug!("列表项无法提取帖子 ID，跳过：watch={} href={}", watch.name, href);
+            tracing::debug!(
+                "列表项无法提取帖子 ID，跳过：watch={} href={}",
+                watch.name,
+                href
+            );
             continue;
         };
         let abs_url = match &base {
@@ -258,7 +288,10 @@ mod tests {
 
     #[test]
     fn test_extract_id_default_path_tail() {
-        assert_eq!(extract_id("/post-911200-1", None), Some("post-911200-1".to_string()));
+        assert_eq!(
+            extract_id("/post-911200-1", None),
+            Some("post-911200-1".to_string())
+        );
         assert_eq!(extract_id("/a/b/123/", None), Some("123".to_string()));
         assert_eq!(extract_id("", None), None);
         assert_eq!(extract_id("/", None), None);
@@ -267,7 +300,10 @@ mod tests {
     #[test]
     fn test_extract_id_pattern_captures_group_one() {
         let re = regex::Regex::new(r"post-(\d+)-").unwrap();
-        assert_eq!(extract_id("/post-911200-1", Some(&re)), Some("911200".to_string()));
+        assert_eq!(
+            extract_id("/post-911200-1", Some(&re)),
+            Some("911200".to_string())
+        );
     }
 
     #[test]
@@ -280,7 +316,10 @@ mod tests {
     fn test_urljoin() {
         assert_eq!(urljoin("https://e.com/list", "/a/b"), "https://e.com/a/b");
         assert_eq!(
-            urljoin("https://www.nodeseek.com/", "https://www.nodeseek.com/post-1-1"),
+            urljoin(
+                "https://www.nodeseek.com/",
+                "https://www.nodeseek.com/post-1-1"
+            ),
             "https://www.nodeseek.com/post-1-1"
         );
     }

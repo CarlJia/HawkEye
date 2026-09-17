@@ -87,8 +87,11 @@ impl Receiver {
                 "getUpdates 返回 {status}"
             )));
         }
-        let payload: Value = serde_json::from_str(&body)
-            .map_err(|e| ReceiveError::Fatal(TelegramFatalError(format!("Telegram 返回了无效的 JSON：{e}"))))?;
+        let payload: Value = serde_json::from_str(&body).map_err(|e| {
+            ReceiveError::Fatal(TelegramFatalError(format!(
+                "Telegram 返回了无效的 JSON：{e}"
+            )))
+        })?;
         let result = payload
             .get("result")
             .and_then(|r| r.as_array())
@@ -117,7 +120,8 @@ impl Receiver {
 
     /// 长轮询一次，返回本轮采纳的命令（未采纳的消息同样推进游标）。
     pub async fn poll(&mut self) -> Result<Vec<Command>, ReceiveError> {
-        let mut params = serde_json::json!({"timeout": LONG_POLL_SECS, "allowed_updates": ["message"]});
+        let mut params =
+            serde_json::json!({"timeout": LONG_POLL_SECS, "allowed_updates": ["message"]});
         if let Some(offset) = self.offset {
             params["offset"] = serde_json::json!(offset);
         }
@@ -154,9 +158,14 @@ impl Receiver {
             tracing::warn!("忽略非授权会话的消息：chat_id={chat_id}");
             return None;
         }
-        let text = message.get("text").and_then(|v| v.as_str()).map(|s| s.trim());
+        let text = message
+            .get("text")
+            .and_then(|v| v.as_str())
+            .map(|s| s.trim());
         match text {
-            Some(t) if !t.is_empty() => Some(Command { text: t.to_string() }),
+            Some(t) if !t.is_empty() => Some(Command {
+                text: t.to_string(),
+            }),
             _ => {
                 tracing::debug!("忽略非文本消息");
                 None
@@ -225,8 +234,8 @@ async fn sleep_or_stop(delay: Duration, stop: &mut tokio::sync::watch::Receiver<
 #[cfg(test)]
 mod tests {
     use super::*;
-    use async_trait::async_trait;
     use crate::notify::ReqwestApi;
+    use async_trait::async_trait;
     use std::sync::Mutex;
 
     /// 脚本化假 API 的响应：立即返回，或模拟长轮询挂起。
@@ -235,18 +244,21 @@ mod tests {
         Hang,
     }
 
+    /// 假 API 的响应处理器；`Box<dyn Fn…>` 直接写进字段会触发 type_complexity。
+    type MockHandler = Box<dyn Fn(usize, &serde_json::Value) -> MockResponse + Send + Sync>;
+
     /// 脚本化假 API：闭包按调用序给出响应；记录全部 payload。
     struct MockApi {
-        handler: Box<dyn Fn(usize, &serde_json::Value) -> MockResponse + Send + Sync>,
+        handler: MockHandler,
         calls: Mutex<Vec<serde_json::Value>>,
     }
 
     impl MockApi {
         fn new(
             handler: impl Fn(usize, &serde_json::Value) -> Result<(u16, String), String>
-                + Send
-                + Sync
-                + 'static,
+            + Send
+            + Sync
+            + 'static,
         ) -> Arc<Self> {
             Arc::new(Self {
                 handler: Box::new(move |n, p| MockResponse::Immediate(handler(n, p))),
@@ -315,9 +327,15 @@ mod tests {
 
     #[tokio::test]
     async fn test_authorized_text_becomes_command() {
-        let api = MockApi::new(|_, _| Ok((200, ok(vec![update(1, json_num(42), Some(" /list "))]))));
+        let api =
+            MockApi::new(|_, _| Ok((200, ok(vec![update(1, json_num(42), Some(" /list "))]))));
         let mut r = receiver(api);
-        assert_eq!(r.poll().await.unwrap(), vec![Command { text: "/list".into() }]);
+        assert_eq!(
+            r.poll().await.unwrap(),
+            vec![Command {
+                text: "/list".into()
+            }]
+        );
     }
 
     fn json_num(v: i64) -> Value {
@@ -326,7 +344,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_unauthorized_chat_is_dropped_without_reply() {
-        let api = MockApi::new(|_, _| Ok((200, ok(vec![update(7, json_num(999), Some("/del 1"))]))));
+        let api =
+            MockApi::new(|_, _| Ok((200, ok(vec![update(7, json_num(999), Some("/del 1"))]))));
         let mut r = receiver(api.clone());
         assert!(r.poll().await.unwrap().is_empty());
         // 全程只有一次 getUpdates，没有任何 sendMessage。
@@ -348,10 +367,13 @@ mod tests {
     async fn test_offset_advances_even_for_ignored_updates() {
         let api = MockApi::new(|n, _| {
             if n == 0 {
-                Ok((200, ok(vec![
-                    update(10, json_num(999), Some("/del 1")),
-                    update(11, json_num(42), Some("/help")),
-                ])))
+                Ok((
+                    200,
+                    ok(vec![
+                        update(10, json_num(999), Some("/del 1")),
+                        update(11, json_num(42), Some("/help")),
+                    ]),
+                ))
             } else {
                 Ok((200, ok(vec![])))
             }
@@ -359,7 +381,9 @@ mod tests {
         let mut r = receiver(api.clone());
         assert_eq!(
             r.poll().await.unwrap(),
-            vec![Command { text: "/help".into() }]
+            vec![Command {
+                text: "/help".into()
+            }]
         );
         assert!(r.poll().await.unwrap().is_empty());
         let bodies = api.bodies();
@@ -373,10 +397,13 @@ mod tests {
     async fn test_drain_backlog_skips_pending_updates() {
         let api = MockApi::new(|_, payload| {
             if payload.get("offset").and_then(|v| v.as_i64()) == Some(-1) {
-                Ok((200, ok(vec![
-                    update(4, json_num(42), Some("/del 1")),
-                    update(5, json_num(42), Some("/add")),
-                ])))
+                Ok((
+                    200,
+                    ok(vec![
+                        update(4, json_num(42), Some("/del 1")),
+                        update(5, json_num(42), Some("/add")),
+                    ]),
+                ))
             } else {
                 Ok((200, ok(vec![])))
             }
@@ -385,10 +412,7 @@ mod tests {
         r.drain_backlog().await.unwrap();
         assert!(r.poll().await.unwrap().is_empty());
         let bodies = api.bodies();
-        assert_eq!(
-            bodies[0],
-            serde_json::json!({"offset": -1, "timeout": 0})
-        );
+        assert_eq!(bodies[0], serde_json::json!({"offset": -1, "timeout": 0}));
         assert_eq!(bodies[1]["offset"], 6, "直接跳到积压最后一条之后");
     }
 
@@ -459,7 +483,12 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!((*got.lock().unwrap()).clone(), vec![Command { text: "/list".into() }]);
+        assert_eq!(
+            (*got.lock().unwrap()).clone(),
+            vec![Command {
+                text: "/list".into()
+            }]
+        );
         drop(stop_tx);
     }
 

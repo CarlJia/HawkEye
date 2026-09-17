@@ -3,7 +3,9 @@
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use hawkeye::config::{detect_selector_type, load_config, load_raw, parse_config, MonitoredElement};
+use hawkeye::config::{
+    MonitoredElement, detect_selector_type, load_config, load_raw, parse_config,
+};
 
 static COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -592,7 +594,11 @@ fn test_detect_selector_type() {
         ("css=//not-really", "css"),
     ];
     for (selector, expected) in cases {
-        assert_eq!(detect_selector_type(selector), expected, "selector: {selector}");
+        assert_eq!(
+            detect_selector_type(selector),
+            expected,
+            "selector: {selector}"
+        );
     }
 }
 
@@ -638,7 +644,10 @@ poll_interval_secs = 45
     let w = &cfg.watches[0];
     assert_eq!(w.name, "NodeSeek 首页");
     assert_eq!(w.url, "https://www.nodeseek.com/");
-    assert_eq!(w.link_selector, "//*[@id=\"nsk-body-left\"]/ul/li/div/div[1]/a");
+    assert_eq!(
+        w.link_selector,
+        "//*[@id=\"nsk-body-left\"]/ul/li/div/div[1]/a"
+    );
     assert_eq!(w.keywords, vec!["hk", "HK"]);
     assert_eq!(w.id_pattern.as_deref(), Some(r"post-(\d+)-"));
     assert_eq!(w.poll_interval_secs, 45);
@@ -770,15 +779,24 @@ selector = "#a"
     let cfg = load_config(&write(content)).unwrap();
     assert_eq!(cfg.fingerprint.user_agent.as_deref(), Some("ua/1.0"));
     assert_eq!(cfg.fingerprint.locale.as_deref(), Some("zh-CN"));
-    assert_eq!(cfg.fingerprint.timezone_id.as_deref(), Some("Asia/Shanghai"));
+    assert_eq!(
+        cfg.fingerprint.timezone_id.as_deref(),
+        Some("Asia/Shanghai")
+    );
     assert_eq!(cfg.fingerprint.color_scheme.as_deref(), Some("dark"));
     assert_eq!(
         cfg.fingerprint.viewport,
-        Some(hawkeye::config::Viewport { width: 1440, height: 900 })
+        Some(hawkeye::config::Viewport {
+            width: 1440,
+            height: 900
+        })
     );
     let page = &cfg.pages()[0];
     assert_eq!(page.fingerprint.user_agent.as_deref(), Some("ua/1.0"));
-    assert_eq!(page.fingerprint.timezone_id.as_deref(), Some("Asia/Shanghai"));
+    assert_eq!(
+        page.fingerprint.timezone_id.as_deref(),
+        Some("Asia/Shanghai")
+    );
     assert!(page.proxy.is_none());
 }
 
@@ -803,7 +821,10 @@ selector = "#a"
 "##;
     let cfg = load_config(&write(content)).unwrap();
     assert_eq!(cfg.fingerprint.locale.as_deref(), Some("en-US"));
-    assert_eq!(cfg.merchants[0].fingerprint.locale.as_deref(), Some("ja-JP"));
+    assert_eq!(
+        cfg.merchants[0].fingerprint.locale.as_deref(),
+        Some("ja-JP")
+    );
     assert_eq!(cfg.pages()[0].fingerprint.locale.as_deref(), Some("ja-JP"));
 }
 
@@ -936,5 +957,8 @@ proxy = "socks5://127.0.0.1:1080"
     let cfg = load_config(&write(content)).unwrap();
     let w = &cfg.watches[0];
     assert_eq!(w.fingerprint.locale.as_deref(), Some("ja-JP"));
-    assert_eq!(w.proxy.as_ref().map(|p| p.server.as_str()), Some("socks5://127.0.0.1:1080"));
+    assert_eq!(
+        w.proxy.as_ref().map(|p| p.server.as_str()),
+        Some("socks5://127.0.0.1:1080")
+    );
 }

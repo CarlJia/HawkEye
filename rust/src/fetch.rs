@@ -15,12 +15,14 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use chromiumoxide::browser::{Browser, BrowserConfig};
 use chromiumoxide::Page;
+use chromiumoxide::browser::{Browser, BrowserConfig};
 use futures::StreamExt;
 
-use crate::config::{Config, Fingerprint, MonitoredElement, Page as ConfigPage, ProxyConfig, WatchTarget};
-use crate::extract::{extract_list_items, extract_text, ListItem};
+use crate::config::{
+    Config, Fingerprint, MonitoredElement, Page as ConfigPage, ProxyConfig, WatchTarget,
+};
+use crate::extract::{ListItem, extract_list_items, extract_text};
 
 /// 导航时的瞬时网络错误：代理抖动会掐断在途连接，下一瞬多半自愈，做有限次重试。
 const TRANSIENT_NAV_ERRORS: &[&str] = &[
@@ -55,7 +57,9 @@ const CHALLENGE_DOM_SELECTOR: &str = concat!(
 const CHALLENGE_BACKOFF_SECS: [f64; 3] = [8.0, 12.0, 25.0];
 
 fn is_transient_nav_error(reason: &str) -> bool {
-    TRANSIENT_NAV_ERRORS.iter().any(|code| reason.contains(code))
+    TRANSIENT_NAV_ERRORS
+        .iter()
+        .any(|code| reason.contains(code))
 }
 
 fn first_line(s: &str) -> String {
@@ -164,7 +168,9 @@ pub enum PageResult {
     /// 页面级失败：创建上下文/页面或导航失败，本轮无法提取任何元素。
     LoadError { reason: String },
     /// 页面导航成功，携带每个元素各自的提取结果。
-    Fetched { results: Vec<(MonitoredElement, FetchResult)> },
+    Fetched {
+        results: Vec<(MonitoredElement, FetchResult)>,
+    },
 }
 
 /// 列表页结果。
@@ -177,7 +183,12 @@ pub enum ListResult {
 // ---- 导航与等待 ----
 
 /// Playwright wait_until 语义在 CDP lifecycleEvent 上的映射。
-async fn goto_and_wait(page: &Page, url: &str, wait_until: &str, timeout: Duration) -> Result<(), String> {
+async fn goto_and_wait(
+    page: &Page,
+    url: &str,
+    wait_until: &str,
+    timeout: Duration,
+) -> Result<(), String> {
     use chromiumoxide::cdp::browser_protocol::page::NavigateParams;
 
     // CDP lifecycle 事件名：init（导航提交）/ DOMContentLoaded / load / networkIdle。
@@ -204,7 +215,10 @@ async fn goto_and_wait(page: &Page, url: &str, wait_until: &str, timeout: Durati
         Err("事件流关闭".to_string())
     };
     let (nav_res, wait_res) = tokio::join!(
-        async { nav.await.map_err(|e| format!("导航失败：{}", first_line(&e.to_string()))) },
+        async {
+            nav.await
+                .map_err(|e| format!("导航失败：{}", first_line(&e.to_string())))
+        },
         async {
             tokio::time::timeout(timeout, wait)
                 .await
@@ -215,9 +229,7 @@ async fn goto_and_wait(page: &Page, url: &str, wait_until: &str, timeout: Durati
     // commit / domcontentloaded / load / networkIdle：等到了才算导航成功。
     wait_res?;
     // 导航本身报错（net::ERR_*）也按失败处理；但若事件已到，优先事件结果。
-    if let Err(e) = nav_res {
-        return Err(e);
-    }
+    nav_res?;
     Ok(())
 }
 
@@ -261,18 +273,32 @@ async fn wait_for_challenge_clear(page: &Page, label: &str) -> bool {
     if !challenge {
         return true;
     }
-    tracing::info!("页面 {label} 检测到反爬挑战页，命中片段：{}", hits.join(";"));
+    tracing::info!(
+        "页面 {label} 检测到反爬挑战页，命中片段：{}",
+        hits.join(";")
+    );
     for (attempt, backoff) in CHALLENGE_BACKOFF_SECS.iter().enumerate() {
-        tracing::info!("页面 {label} 等待反爬挑战页放行，{backoff:.0}s 后重检（第 {} 次）", attempt + 1);
+        tracing::info!(
+            "页面 {label} 等待反爬挑战页放行，{backoff:.0}s 后重检（第 {} 次）",
+            attempt + 1
+        );
         tokio::time::sleep(Duration::from_secs_f64(*backoff)).await;
         let (is_challenge, hits) = is_challenge_page(page).await;
         tracing::debug!(
             "页面 {label} 挑战页重检（第 {} 次）：{}",
             attempt + 1,
-            if hits.is_empty() { "已放行".to_string() } else { hits.join(";") }
+            if hits.is_empty() {
+                "已放行".to_string()
+            } else {
+                hits.join(";")
+            }
         );
         if !is_challenge {
-            tracing::info!("页面 {label} 反爬挑战页已通过（第 {} 次重检后，命中片段：{}）", attempt + 1, hits.join(";"));
+            tracing::info!(
+                "页面 {label} 反爬挑战页已通过（第 {} 次重检后，命中片段：{}）",
+                attempt + 1,
+                hits.join(";")
+            );
             return true;
         }
         challenge = is_challenge;
@@ -328,12 +354,12 @@ fn detect_bundled_chromium() -> Option<PathBuf> {
     let entries = std::fs::read_dir(&base).ok()?;
     for e in entries.flatten() {
         let name = e.file_name().to_string_lossy().to_string();
-        if let Some(rest) = name.strip_prefix("chromium-") {
-            if let Ok(ver) = rest.parse::<u64>() {
-                let exec = e.path().join("chrome");
-                if exec.exists() && best.as_ref().map(|(v, _)| ver > *v).unwrap_or(true) {
-                    best = Some((ver, exec));
-                }
+        if let Some(rest) = name.strip_prefix("chromium-")
+            && let Ok(ver) = rest.parse::<u64>()
+        {
+            let exec = e.path().join("chrome");
+            if exec.exists() && best.as_ref().map(|(v, _)| ver > *v).unwrap_or(true) {
+                best = Some((ver, exec));
             }
         }
     }
@@ -362,23 +388,30 @@ impl BrowserManager {
             "--disable-blink-features=AutomationControlled".to_string(),
         ];
         // SOCKS5 走 Chromium CLI 形参（CDP/Playwright 的 proxy 字段对 SOCKS 不完整生效）。
-        if let Some(proxy) = &self.proxy {
-            if let Some(socks_arg) = socks5_proxy_server_arg(proxy) {
-                args.push(socks_arg);
-            }
+        if let Some(proxy) = &self.proxy
+            && let Some(socks_arg) = socks5_proxy_server_arg(proxy)
+        {
+            args.push(socks_arg);
         }
 
         // 优先真 Chrome（等价 channel="chrome"），未装时降级 bundled chromium。
         let exec = detect_chrome_path();
         let (exec, using_chrome) = match exec {
             Some(p) => (p, true),
-            None => match detect_bundled_chromium() {
-                Some(p) => {
-                    tracing::warn!("未装 Google Chrome，降级 bundled chromium；装 Google Chrome 可更稳过 CF");
-                    (p, false)
+            None => {
+                match detect_bundled_chromium() {
+                    Some(p) => {
+                        tracing::warn!(
+                            "未装 Google Chrome，降级 bundled chromium；装 Google Chrome 可更稳过 CF"
+                        );
+                        (p, false)
+                    }
+                    None => return Err(
+                        "找不到可用的 Chromium 可执行文件（Google Chrome 或 Playwright chromium）"
+                            .to_string(),
+                    ),
                 }
-                None => return Err("找不到可用的 Chromium 可执行文件（Google Chrome 或 Playwright chromium）".to_string()),
-            },
+            }
         };
 
         let mut builder = BrowserConfig::builder()
@@ -387,14 +420,16 @@ impl BrowserManager {
             .args(args)
             .request_timeout(Duration::from_secs(60));
         // HTTP 代理走 Chromium CLI 形参（chromiumoxide 的 connect 代理支持有限）。
-        if let Some(proxy) = &self.proxy {
-            if !proxy_is_socks5(proxy) {
-                let server = proxy.server.clone();
-                builder = builder.arg(format!("--proxy-server={server}"));
-            }
+        if let Some(proxy) = &self.proxy
+            && !proxy_is_socks5(proxy)
+        {
+            let server = proxy.server.clone();
+            builder = builder.arg(format!("--proxy-server={server}"));
         }
 
-        let config = builder.build().map_err(|e| format!("构建浏览器配置失败：{e}"))?;
+        let config = builder
+            .build()
+            .map_err(|e| format!("构建浏览器配置失败：{e}"))?;
         let (browser, mut handler) = Browser::launch(config)
             .await
             .map_err(|e| format!("启动 Chromium 失败：{}", first_line(&e.to_string())))?;
@@ -411,25 +446,32 @@ impl BrowserManager {
             .version()
             .await
             .map_err(|e| format!("读取 Chromium 版本失败：{e}"))?;
-        self.chromium_major
-            .store(
-                version
-                    .product
-                    .split('/')
-                    .nth(1)
-                    .and_then(|v| v.split('.').next())
-                    .and_then(|v| v.parse().ok())
-                    .unwrap_or(0),
-                std::sync::atomic::Ordering::Relaxed,
-            );
+        self.chromium_major.store(
+            version
+                .product
+                .split('/')
+                .nth(1)
+                .and_then(|v| v.split('.').next())
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(0),
+            std::sync::atomic::Ordering::Relaxed,
+        );
         tracing::info!(
             "无头浏览器已启动，{} + stealth（JS 层指纹补丁）",
-            if using_chrome { "真 Chrome（HTTP 层对齐）" } else { "bundled chromium" }
+            if using_chrome {
+                "真 Chrome（HTTP 层对齐）"
+            } else {
+                "bundled chromium"
+            }
         );
         if let Some(proxy) = &self.proxy {
             tracing::info!(
                 "代理已配置（{}，server={}）",
-                if proxy_is_socks5(proxy) { "SOCKS5（Chromium CLI）" } else { "HTTP（Chromium CLI）" },
+                if proxy_is_socks5(proxy) {
+                    "SOCKS5（Chromium CLI）"
+                } else {
+                    "HTTP（Chromium CLI）"
+                },
                 redact_proxy_server(&proxy.server)
             );
         }
@@ -439,10 +481,13 @@ impl BrowserManager {
 
     pub async fn close(&self) {
         let mut guard = self.browser.lock().await;
-        if let Some(mut browser) = guard.take() {
-            if let Err(e) = browser.close().await {
-                tracing::warn!("关闭浏览器时忽略异常（驱动可能已退出）：{}", first_line(&e.to_string()));
-            }
+        if let Some(mut browser) = guard.take()
+            && let Err(e) = browser.close().await
+        {
+            tracing::warn!(
+                "关闭浏览器时忽略异常（驱动可能已退出）：{}",
+                first_line(&e.to_string())
+            );
         }
         tracing::info!("无头浏览器已关闭");
     }
@@ -462,10 +507,12 @@ impl BrowserManager {
         drop(browser_guard);
 
         // stealth + fingerprint：在导航前一次性注入 init script。
-        let ua = fingerprint
-            .user_agent
-            .clone()
-            .unwrap_or_else(|| default_user_agent(self.chromium_major.load(std::sync::atomic::Ordering::Relaxed)));
+        let ua = fingerprint.user_agent.clone().unwrap_or_else(|| {
+            default_user_agent(
+                self.chromium_major
+                    .load(std::sync::atomic::Ordering::Relaxed),
+            )
+        });
         // HTTP 层 UA 覆盖（等价 Playwright 的 context user_agent）：init script 只能改
         // JS 层的 navigator.*，User-Agent / Accept-Language 头仍是真机值。两层不一致
         // 正是 CF 判定伪造 UA 的信号，挑战页因此永不放行——必须用 CDP 一并盖掉。
@@ -497,18 +544,24 @@ impl BrowserManager {
             use chromiumoxide::cdp::browser_protocol::emulation::SetTimezoneOverrideParams;
             let _ = page.execute(SetTimezoneOverrideParams::new(tz)).await;
         }
-        if let Some(color) = &fingerprint.color_scheme {
-            if color != "null" {
-                use chromiumoxide::cdp::browser_protocol::emulation::{MediaFeature, SetEmulatedMediaParams};
-                let feature = MediaFeature::builder()
-                    .name("prefers-color-scheme".to_string())
-                    .value(color.clone())
-                    .build()
-                    .expect("构建 MediaFeature 失败");
-                let _ = page
-                    .execute(SetEmulatedMediaParams::builder().features(vec![feature]).build())
-                    .await;
-            }
+        if let Some(color) = &fingerprint.color_scheme
+            && color != "null"
+        {
+            use chromiumoxide::cdp::browser_protocol::emulation::{
+                MediaFeature, SetEmulatedMediaParams,
+            };
+            let feature = MediaFeature::builder()
+                .name("prefers-color-scheme".to_string())
+                .value(color.clone())
+                .build()
+                .expect("构建 MediaFeature 失败");
+            let _ = page
+                .execute(
+                    SetEmulatedMediaParams::builder()
+                        .features(vec![feature])
+                        .build(),
+                )
+                .await;
         }
         use chromiumoxide::cdp::browser_protocol::page::AddScriptToEvaluateOnNewDocumentParams;
         let add_script = AddScriptToEvaluateOnNewDocumentParams::builder()
@@ -523,8 +576,8 @@ impl BrowserManager {
         if let Some(viewport) = &fingerprint.viewport {
             use chromiumoxide::cdp::browser_protocol::emulation::SetDeviceMetricsOverrideParams;
             let metrics = SetDeviceMetricsOverrideParams::builder()
-                .width(viewport.width as i64)
-                .height(viewport.height as i64)
+                .width(viewport.width)
+                .height(viewport.height)
                 .device_scale_factor(1.0)
                 .mobile(false)
                 .build()
@@ -533,25 +586,39 @@ impl BrowserManager {
         }
 
         // 页面级 HTTP 代理在 launch 时全局注入；此处仅记录不支持页面级差异。
-        if let Some(p) = proxy {
-            if !proxy_is_socks5(p) {
-                tracing::debug!("页面级 HTTP 代理差异暂由全局 --proxy-server 覆盖");
-            }
+        if let Some(p) = proxy
+            && !proxy_is_socks5(p)
+        {
+            tracing::debug!("页面级 HTTP 代理差异暂由全局 --proxy-server 覆盖");
         }
         Ok(page)
     }
 
     /// 带瞬时错误重试的导航 + 挑战页等待。
-    async fn navigate(&self, page: &Page, url: &str, wait_until: &str, timeout_secs: i64, label: &str) -> Result<(), String> {
+    async fn navigate(
+        &self,
+        page: &Page,
+        url: &str,
+        wait_until: &str,
+        timeout_secs: i64,
+        label: &str,
+    ) -> Result<(), String> {
         let timeout = Duration::from_secs(timeout_secs.max(1) as u64);
-        for attempt in 0..=NAV_RETRY_BACKOFF_SECS.len() {
+        // 首次 + 每个退避档各一次，最后那次没有退避（None）也不再重试。
+        let attempts = NAV_RETRY_BACKOFF_SECS
+            .iter()
+            .map(Some)
+            .chain(std::iter::once(None));
+        for (attempt, backoff) in attempts.enumerate() {
             match goto_and_wait(page, url, wait_until, timeout).await {
                 Ok(()) => break,
                 Err(reason) => {
-                    if attempt < NAV_RETRY_BACKOFF_SECS.len() && is_transient_nav_error(&reason) {
-                        let backoff = NAV_RETRY_BACKOFF_SECS[attempt];
-                        tracing::info!("页面 {label} 导航瞬时失败（第 {} 次），{backoff:.0}s 后重试：{reason}", attempt + 1);
-                        tokio::time::sleep(Duration::from_secs_f64(backoff)).await;
+                    if let Some(backoff) = backoff.filter(|_| is_transient_nav_error(&reason)) {
+                        tracing::info!(
+                            "页面 {label} 导航瞬时失败（第 {} 次），{backoff:.0}s 后重试：{reason}",
+                            attempt + 1
+                        );
+                        tokio::time::sleep(Duration::from_secs_f64(*backoff)).await;
                         continue;
                     }
                     return Err(reason);
@@ -575,7 +642,13 @@ impl BrowserManager {
             Err(e) => return PageResult::LoadError { reason: e },
         };
         if let Err(reason) = self
-            .navigate(&page, &page_cfg.url, &page_cfg.wait_until, page_cfg.nav_timeout_secs, &page_cfg.identity())
+            .navigate(
+                &page,
+                &page_cfg.url,
+                &page_cfg.wait_until,
+                page_cfg.nav_timeout_secs,
+                &page_cfg.identity(),
+            )
             .await
         {
             let _ = page.close().await;
@@ -611,7 +684,13 @@ impl BrowserManager {
             Err(e) => return ListResult::LoadError { reason: e },
         };
         if let Err(reason) = self
-            .navigate(&page, &watch.url, &watch.wait_until, watch.nav_timeout_secs, &watch.identity())
+            .navigate(
+                &page,
+                &watch.url,
+                &watch.wait_until,
+                watch.nav_timeout_secs,
+                &watch.identity(),
+            )
             .await
         {
             let _ = page.close().await;
@@ -638,10 +717,15 @@ mod tests {
             Some("macOS")
         );
         assert_eq!(
-            platform_from_ua("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/152.0.0.0 Safari/537.36"),
+            platform_from_ua(
+                "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/152.0.0.0 Safari/537.36"
+            ),
             Some("Linux")
         );
-        assert_eq!(platform_from_ua("Mozilla/5.0 (Linux; Android 14) Chrome/152.0.0.0"), Some("Android"));
+        assert_eq!(
+            platform_from_ua("Mozilla/5.0 (Linux; Android 14) Chrome/152.0.0.0"),
+            Some("Android")
+        );
         assert_eq!(platform_from_ua("curl/8.0"), None);
     }
 }

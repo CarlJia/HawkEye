@@ -17,7 +17,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use crate::config::{load_raw, TelegramConfig};
+use crate::config::{TelegramConfig, load_raw};
 use crate::configedit::write_config;
 use crate::notify::{Notifier, TelegramApi};
 
@@ -68,7 +68,10 @@ fn apply_telegram(raw: &toml::Table, bot_token: &str, chat_id: &str) -> toml::Ta
         .and_then(|v| v.as_table())
         .cloned()
         .unwrap_or_default();
-    tg.insert("bot_token".into(), toml::Value::String(bot_token.to_string()));
+    tg.insert(
+        "bot_token".into(),
+        toml::Value::String(bot_token.to_string()),
+    );
     tg.insert("chat_id".into(), toml::Value::String(chat_id.to_string()));
     new_raw.insert("telegram".into(), toml::Value::Table(tg));
     new_raw
@@ -78,7 +81,10 @@ fn apply_telegram(raw: &toml::Table, bot_token: &str, chat_id: &str) -> toml::Ta
 
 fn ask_bot_token(ask: &mut dyn Ask) -> String {
     loop {
-        let value = ask.ask_secret("请输入 Telegram bot_token（输入隐藏）：").trim().to_string();
+        let value = ask
+            .ask_secret("请输入 Telegram bot_token（输入隐藏）：")
+            .trim()
+            .to_string();
         if !value.is_empty() {
             return value;
         }
@@ -89,7 +95,10 @@ fn ask_bot_token(ask: &mut dyn Ask) -> String {
 fn ask_chat_id(ask: &mut dyn Ask) -> String {
     // chat_id 允许负数（群聊 supergroup id 为负）。空串重问。
     loop {
-        let value = ask.ask("请输入 Telegram chat_id（个人或群，群 id 通常为负数）：").trim().to_string();
+        let value = ask
+            .ask("请输入 Telegram chat_id（个人或群，群 id 通常为负数）：")
+            .trim()
+            .to_string();
         if !value.is_empty() {
             return value;
         }
@@ -145,7 +154,10 @@ async fn verify(bot_token: &str, chat_id: &str, api: Option<Arc<dyn TelegramApi>
     notifier.verify().await.is_ok()
 }
 
-async fn collect_credentials(ask: &mut dyn Ask, api: Option<Arc<dyn TelegramApi>>) -> (String, String) {
+async fn collect_credentials(
+    ask: &mut dyn Ask,
+    api: Option<Arc<dyn TelegramApi>>,
+) -> (String, String) {
     // 自检失败就地重问。
     loop {
         let bot_token = ask_bot_token(ask);
@@ -278,7 +290,8 @@ mod tests {
     }
 
     fn tmp_path(tag: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("hawkeye_wiz_test_{}_{}", std::process::id(), tag));
+        let dir =
+            std::env::temp_dir().join(format!("hawkeye_wiz_test_{}_{}", std::process::id(), tag));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir.join("config.toml")
@@ -368,7 +381,10 @@ mod tests {
         // 首轮 400（永久拒绝）→ 就地重问；第二轮 200 → 通过。
         let api = Arc::new(MockApi {
             responses: Mutex::new(vec![
-                Ok((400, r#"{"description":"Bad Request: chat not found"}"#.into())),
+                Ok((
+                    400,
+                    r#"{"description":"Bad Request: chat not found"}"#.into(),
+                )),
                 Ok((200, r#"{"ok":true}"#.into())),
             ]),
         });
@@ -392,10 +408,21 @@ mod tests {
         assert_eq!(chat, "chat1");
     }
 
-    async fn run(path: &Path, answers: &[&str], run_verify: bool) -> (Result<bool, crate::configedit::EditError>, Vec<String>) {
+    async fn run(
+        path: &Path,
+        answers: &[&str],
+        run_verify: bool,
+    ) -> (Result<bool, crate::configedit::EditError>, Vec<String>) {
         let mut ask = ScriptedAsk::new(answers);
         let mut lines = Vec::new();
-        let result = run_wizard(path, &mut ask, &mut |m: &str| lines.push(m.to_string()), run_verify, None).await;
+        let result = run_wizard(
+            path,
+            &mut ask,
+            &mut |m: &str| lines.push(m.to_string()),
+            run_verify,
+            None,
+        )
+        .await;
         (result, lines)
     }
 
@@ -457,7 +484,10 @@ mod tests {
         result.unwrap();
         let summary = lines.join("\n");
         assert!(summary.contains("***"), "摘要应只露尾部：{summary}");
-        assert!(!summary.contains("8428922140:AA-fake-token"), "完整 token 绝不能出现在摘要");
+        assert!(
+            !summary.contains("8428922140:AA-fake-token"),
+            "完整 token 绝不能出现在摘要"
+        );
         let _ = std::fs::remove_dir_all(p.parent().unwrap());
     }
 
@@ -494,7 +524,12 @@ mod tests {
         let p = tmp_path("summary");
         std::fs::write(&p, "[telegram]\nbot_token = \"t\"\nchat_id = \"c\"\n").unwrap();
         let mut lines = Vec::new();
-        print_summary(&mut |m: &str| lines.push(m.to_string()), &p, "1234567890:ABC", "42");
+        print_summary(
+            &mut |m: &str| lines.push(m.to_string()),
+            &p,
+            "1234567890:ABC",
+            "42",
+        );
         let text = lines.join("\n");
         assert!(text.contains(":ABC"), "{text}");
         assert!(text.contains("42"));

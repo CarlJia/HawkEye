@@ -17,13 +17,13 @@ use tokio::sync::{Mutex, OwnedSemaphorePermit, Semaphore};
 
 use crate::alert::{FailureState, FailureTracker};
 use crate::config::{Config, MonitoredElement, Page, WatchTarget};
-use crate::detect::{detect, detect_new, merge_seen, DetectNewResult, DetectResult};
+use crate::detect::{DetectNewResult, DetectResult, detect, detect_new, merge_seen};
 use crate::extract::ListItem;
 use crate::fetch::{FetchResult, ListResult, PageResult};
 use crate::notify::{
-    format_change_message, format_failure_message, format_new_post_message, NotifierApi,
+    NotifierApi, format_change_message, format_failure_message, format_new_post_message,
 };
-use crate::state::{load_state, now_iso, save_state, Entry, State};
+use crate::state::{Entry, State, load_state, now_iso, save_state};
 
 /// 抓取后端（测试注入假实现，生产用 BrowserManager）。
 #[async_trait]
@@ -49,7 +49,9 @@ pub const KIND_WATCH: &str = "论坛";
 /// 标题关键字匹配：子串 + 不区分大小写 + 任一命中（OR）。
 pub fn matches(keywords: &[String], title: &str) -> bool {
     let lowered = title.to_lowercase();
-    keywords.iter().any(|kw| lowered.contains(&kw.to_lowercase()))
+    keywords
+        .iter()
+        .any(|kw| lowered.contains(&kw.to_lowercase()))
 }
 
 /// `/list` 的一行：类型、稳定标识、来源 URL 与当前状态指示。
@@ -80,7 +82,11 @@ pub struct Scheduler {
 }
 
 impl Scheduler {
-    pub fn new(config: Config, browser: Arc<dyn FetchBackend>, notifier: Arc<dyn NotifierApi>) -> (Arc<Self>, tokio::sync::watch::Receiver<bool>) {
+    pub fn new(
+        config: Config,
+        browser: Arc<dyn FetchBackend>,
+        notifier: Arc<dyn NotifierApi>,
+    ) -> (Arc<Self>, tokio::sync::watch::Receiver<bool>) {
         let state_path = PathBuf::from(&config.state_path);
         let state = load_state(&state_path);
         let max_concurrent = config.max_concurrent_fetches.max(1) as usize;
@@ -166,19 +172,47 @@ impl Scheduler {
     pub async fn reconcile(self: &Arc<Self>, new_config: Config) -> (usize, usize) {
         let old_config = self.config().await;
 
-        let old_pages: HashMap<String, Page> =
-            old_config.pages().into_iter().map(|p| (p.identity(), p.clone())).collect();
-        let new_pages: HashMap<String, Page> =
-            new_config.pages().into_iter().map(|p| (p.identity(), p.clone())).collect();
-        let old_watches: HashMap<String, WatchTarget> =
-            old_config.watches.iter().map(|w| (w.identity(), w.clone())).collect();
-        let new_watches: HashMap<String, WatchTarget> =
-            new_config.watches.iter().map(|w| (w.identity(), w.clone())).collect();
+        let old_pages: HashMap<String, Page> = old_config
+            .pages()
+            .into_iter()
+            .map(|p| (p.identity(), p.clone()))
+            .collect();
+        let new_pages: HashMap<String, Page> = new_config
+            .pages()
+            .into_iter()
+            .map(|p| (p.identity(), p.clone()))
+            .collect();
+        let old_watches: HashMap<String, WatchTarget> = old_config
+            .watches
+            .iter()
+            .map(|w| (w.identity(), w.clone()))
+            .collect();
+        let new_watches: HashMap<String, WatchTarget> = new_config
+            .watches
+            .iter()
+            .map(|w| (w.identity(), w.clone()))
+            .collect();
 
-        let gone_pages: Vec<String> = old_pages.keys().filter(|k| !new_pages.contains_key(*k)).cloned().collect();
-        let gone_watches: Vec<String> = old_watches.keys().filter(|k| !new_watches.contains_key(*k)).cloned().collect();
-        let added_pages: Vec<String> = new_pages.keys().filter(|k| !old_pages.contains_key(*k)).cloned().collect();
-        let added_watches: Vec<String> = new_watches.keys().filter(|k| !old_watches.contains_key(*k)).cloned().collect();
+        let gone_pages: Vec<String> = old_pages
+            .keys()
+            .filter(|k| !new_pages.contains_key(*k))
+            .cloned()
+            .collect();
+        let gone_watches: Vec<String> = old_watches
+            .keys()
+            .filter(|k| !new_watches.contains_key(*k))
+            .cloned()
+            .collect();
+        let added_pages: Vec<String> = new_pages
+            .keys()
+            .filter(|k| !old_pages.contains_key(*k))
+            .cloned()
+            .collect();
+        let added_watches: Vec<String> = new_watches
+            .keys()
+            .filter(|k| !old_watches.contains_key(*k))
+            .cloned()
+            .collect();
         let changed_pages: Vec<String> = new_pages
             .iter()
             .filter(|(k, p)| old_pages.get(*k).map(|o| o != *p).unwrap_or(false))
@@ -204,8 +238,16 @@ impl Scheduler {
             .collect();
 
         // ① 先撤：取消所有要停的任务并等它们真正退出。
-        let stopping_pages: Vec<String> = gone_pages.iter().chain(changed_pages.iter()).cloned().collect();
-        let stopping_watches: Vec<String> = gone_watches.iter().chain(changed_watches.iter()).cloned().collect();
+        let stopping_pages: Vec<String> = gone_pages
+            .iter()
+            .chain(changed_pages.iter())
+            .cloned()
+            .collect();
+        let stopping_watches: Vec<String> = gone_watches
+            .iter()
+            .chain(changed_watches.iter())
+            .cloned()
+            .collect();
         let mut cancelled = Vec::new();
         {
             let mut tasks = self.tasks.lock().await;
@@ -284,9 +326,7 @@ impl Scheduler {
 
     async fn acquire_permit(self: &Arc<Self>) -> OwnedSemaphorePermit {
         let sem = Arc::clone(&self.semaphore);
-        sem.acquire_owned()
-            .await
-            .expect("信号量未关闭")
+        sem.acquire_owned().await.expect("信号量未关闭")
     }
 
     // ---- 快照：/list 的数据来源 ----
@@ -363,7 +403,12 @@ impl Scheduler {
                 };
                 if should_alert {
                     let sent = self
-                        .send_failure_alert(&identity, page.failure_threshold, &reason, Some(&page.url))
+                        .send_failure_alert(
+                            &identity,
+                            page.failure_threshold,
+                            &reason,
+                            Some(&page.url),
+                        )
                         .await;
                     if sent {
                         self.page_failures
@@ -393,7 +438,12 @@ impl Scheduler {
         Ok(())
     }
 
-    async fn handle_element(self: &Arc<Self>, page: &Page, element: &MonitoredElement, el_result: FetchResult) {
+    async fn handle_element(
+        self: &Arc<Self>,
+        page: &Page,
+        element: &MonitoredElement,
+        el_result: FetchResult,
+    ) {
         let identity = element.identity();
         match el_result {
             FetchResult::Ok { value } => {
@@ -415,10 +465,19 @@ impl Scheduler {
                 if should_alert {
                     let jump_url = element.url.clone().unwrap_or_else(|| page.url.clone());
                     let sent = self
-                        .send_failure_alert(&identity, page.failure_threshold, &reason, Some(&jump_url))
+                        .send_failure_alert(
+                            &identity,
+                            page.failure_threshold,
+                            &reason,
+                            Some(&jump_url),
+                        )
                         .await;
                     if sent {
-                        self.elem_failures.lock().await.get_mut(&identity).mark_alerted();
+                        self.elem_failures
+                            .lock()
+                            .await
+                            .get_mut(&identity)
+                            .mark_alerted();
                     } else {
                         tracing::error!("元素 {identity} 失败告警发送失败，下轮重试");
                     }
@@ -427,7 +486,12 @@ impl Scheduler {
         }
     }
 
-    async fn handle_value(self: &Arc<Self>, page: &Page, element: &MonitoredElement, value: String) {
+    async fn handle_value(
+        self: &Arc<Self>,
+        page: &Page,
+        element: &MonitoredElement,
+        value: String,
+    ) {
         let identity = element.identity();
         let previous = {
             let state = self.state.lock().await;
@@ -442,15 +506,30 @@ impl Scheduler {
             }
             DetectResult::Baseline { .. } => {
                 tracing::info!("元素 {identity} 建立基线：{value}");
-                self.store(&identity, Entry::State { value, updated_at: now_iso() }).await;
+                self.store(
+                    &identity,
+                    Entry::State {
+                        value,
+                        updated_at: now_iso(),
+                    },
+                )
+                .await;
             }
             DetectResult::Changed { old, new } => {
                 tracing::info!("元素 {identity} 变更：{old} → {new}");
                 let jump_url = element.url.clone().unwrap_or_else(|| page.url.clone());
-                let text = format_change_message(&identity, &old, &new, &now_iso(), Some(&jump_url));
+                let text =
+                    format_change_message(&identity, &old, &new, &now_iso(), Some(&jump_url));
                 // 至少一次交付：发送成功后才更新已记录值；失败则保留旧值，下轮重试。
                 if self.notifier.send(&text).await {
-                    self.store(&identity, Entry::State { value, updated_at: now_iso() }).await;
+                    self.store(
+                        &identity,
+                        Entry::State {
+                            value,
+                            updated_at: now_iso(),
+                        },
+                    )
+                    .await;
                 } else {
                     tracing::error!("元素 {identity} 通知发送失败，保留旧值等待下次重试");
                 }
@@ -458,7 +537,13 @@ impl Scheduler {
         }
     }
 
-    async fn send_failure_alert(self: &Arc<Self>, label: &str, threshold: i64, reason: &str, url: Option<&str>) -> bool {
+    async fn send_failure_alert(
+        self: &Arc<Self>,
+        label: &str,
+        threshold: i64,
+        reason: &str,
+        url: Option<&str>,
+    ) -> bool {
         let text = format_failure_message(label, threshold, reason, &now_iso(), url);
         self.notifier.send(&text).await
     }
@@ -514,7 +599,11 @@ impl Scheduler {
                     self.alert_watch_failure(watch, reason).await;
                     return Ok(());
                 }
-                self.watch_failures.lock().await.get_mut(&identity).record_success();
+                self.watch_failures
+                    .lock()
+                    .await
+                    .get_mut(&identity)
+                    .record_success();
                 self.handle_watch(watch, items).await;
             }
         }
@@ -525,14 +614,20 @@ impl Scheduler {
         let identity = watch.identity();
         let should_alert = {
             let mut failures = self.watch_failures.lock().await;
-            failures.get_mut(&identity).record_failure(watch.failure_threshold)
+            failures
+                .get_mut(&identity)
+                .record_failure(watch.failure_threshold)
         };
         if should_alert {
             let sent = self
                 .send_failure_alert(&identity, watch.failure_threshold, reason, Some(&watch.url))
                 .await;
             if sent {
-                self.watch_failures.lock().await.get_mut(&identity).mark_alerted();
+                self.watch_failures
+                    .lock()
+                    .await
+                    .get_mut(&identity)
+                    .mark_alerted();
             } else {
                 tracing::error!("列表 {identity} 失败告警发送失败，下轮重试");
             }
@@ -554,8 +649,18 @@ impl Scheduler {
         let current_ids: Vec<String> = items.iter().map(|i| i.post_id.clone()).collect();
         match detect_new(previous_seen.as_ref(), &current_ids) {
             DetectNewResult::SeenBaseline { ids } => {
-                tracing::info!("列表 {identity} 首次运行，静默建立基线：{} 个帖子", ids.len());
-                self.store(&identity, Entry::SeenSet { seen_ids: ids, updated_at: now_iso() }).await;
+                tracing::info!(
+                    "列表 {identity} 首次运行，静默建立基线：{} 个帖子",
+                    ids.len()
+                );
+                self.store(
+                    &identity,
+                    Entry::SeenSet {
+                        seen_ids: ids,
+                        updated_at: now_iso(),
+                    },
+                )
+                .await;
             }
             DetectNewResult::NewItems { new_ids } => {
                 if new_ids.is_empty() {
@@ -578,15 +683,30 @@ impl Scheduler {
                             tracing::info!("列表 {identity} 命中新帖并已通知：{}", post.title);
                             confirmed.push(pid.clone());
                         } else {
-                            tracing::error!("列表 {identity} 新帖通知发送失败，下轮重试：{}", post.title);
+                            tracing::error!(
+                                "列表 {identity} 新帖通知发送失败，下轮重试：{}",
+                                post.title
+                            );
                         }
                     } else {
                         confirmed.push(pid.clone());
                     }
                 }
                 if !confirmed.is_empty() {
-                    let merged = merge_seen(&prior, &current_ids, &confirmed, crate::detect::SEEN_IDS_MAX);
-                    self.store(&identity, Entry::SeenSet { seen_ids: merged, updated_at: now_iso() }).await;
+                    let merged = merge_seen(
+                        &prior,
+                        &current_ids,
+                        &confirmed,
+                        crate::detect::SEEN_IDS_MAX,
+                    );
+                    self.store(
+                        &identity,
+                        Entry::SeenSet {
+                            seen_ids: merged,
+                            updated_at: now_iso(),
+                        },
+                    )
+                    .await;
                 }
             }
         }
@@ -812,19 +932,24 @@ mod tests {
     }
 
     fn state_path(tag: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "hawkeye_sched_test_{}_{}",
-            std::process::id(),
-            tag
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("hawkeye_sched_test_{}_{}", std::process::id(), tag));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir.join("state.json")
     }
 
-    fn config_with(tag: &str, pages: Vec<Page>, watches: Vec<WatchTarget>, max_concurrent: i64) -> Config {
+    fn config_with(
+        tag: &str,
+        pages: Vec<Page>,
+        watches: Vec<WatchTarget>,
+        max_concurrent: i64,
+    ) -> Config {
         Config {
-            telegram: TelegramConfig { bot_token: "x".into(), chat_id: "1".into() },
+            telegram: TelegramConfig {
+                bot_token: "x".into(),
+                chat_id: "1".into(),
+            },
             merchants: vec![Merchant {
                 name: "m".into(),
                 pages,
@@ -855,7 +980,12 @@ mod tests {
         PageResult::Fetched { results: values }
     }
 
-    fn setup(_tag: &str, config: Config, backend: Arc<dyn FetchBackend>, notifier: Arc<MockNotifier>) -> Arc<Scheduler> {
+    fn setup(
+        _tag: &str,
+        config: Config,
+        backend: Arc<dyn FetchBackend>,
+        notifier: Arc<MockNotifier>,
+    ) -> Arc<Scheduler> {
         let (scheduler, _stop) = Scheduler::new(config, backend, notifier);
         scheduler
     }
@@ -866,7 +996,9 @@ mod tests {
     async fn test_page_load_failure_retries_until_sent() {
         let page = page_with(1, vec![element("e")]);
         let config = config_with("pl1", vec![page.clone()], vec![], 4);
-        let backend = MockBackend::pages(vec![PageResult::LoadError { reason: "boom".into() }]);
+        let backend = MockBackend::pages(vec![PageResult::LoadError {
+            reason: "boom".into(),
+        }]);
         let notifier = MockNotifier::new(vec![false, true]);
         let sched = setup("pl1", config, backend, notifier.clone());
 
@@ -876,7 +1008,12 @@ mod tests {
 
         assert_eq!(notifier.sent().len(), 2);
         let failures = sched.page_failures.lock().await;
-        assert!(failures.get(&page.identity()).map(|f| f.alerted).unwrap_or(false));
+        assert!(
+            failures
+                .get(&page.identity())
+                .map(|f| f.alerted)
+                .unwrap_or(false)
+        );
     }
 
     #[tokio::test]
@@ -884,9 +1021,12 @@ mod tests {
         let el = element("e");
         let page = page_with(1, vec![el.clone()]);
         let config = config_with("el1", vec![page.clone()], vec![], 4);
-        let backend = MockBackend::pages(vec![fetched(vec![
-            (el.clone(), FetchResult::Error { reason: "boom".into() }),
-        ])]);
+        let backend = MockBackend::pages(vec![fetched(vec![(
+            el.clone(),
+            FetchResult::Error {
+                reason: "boom".into(),
+            },
+        )])]);
         let notifier = MockNotifier::new(vec![false, true]);
         let sched = setup("el1", config, backend, notifier.clone());
 
@@ -907,16 +1047,23 @@ mod tests {
         let page = page_with(1, vec![el.clone()]);
         let config = config_with("nm1", vec![page.clone()], vec![], 4);
         let reason = "选择器匹配到元素，但其文本为空".to_string();
-        let backend = MockBackend::pages(vec![fetched(vec![
-            (el.clone(), FetchResult::NoMatch { reason: reason.clone() }),
-        ])]);
+        let backend = MockBackend::pages(vec![fetched(vec![(
+            el.clone(),
+            FetchResult::NoMatch {
+                reason: reason.clone(),
+            },
+        )])]);
         let notifier = MockNotifier::new(vec![true]);
         let sched = setup("nm1", config, backend, notifier.clone());
 
         sched.poll_page(&page).await.unwrap();
 
         assert_eq!(notifier.sent().len(), 1);
-        assert!(notifier.sent()[0].contains(&reason), "原话必须到达告警：{}", notifier.sent()[0]);
+        assert!(
+            notifier.sent()[0].contains(&reason),
+            "原话必须到达告警：{}",
+            notifier.sent()[0]
+        );
     }
 
     #[tokio::test]
@@ -933,15 +1080,10 @@ mod tests {
         let sched = setup("cs1", config.clone(), backend, notifier.clone());
 
         async fn state_value(sched: &Scheduler, identity: &str) -> Option<String> {
-            sched
-                .state
-                .lock()
-                .await
-                .get(identity)
-                .map(|e| match e {
-                    Entry::State { value, .. } => value.clone(),
-                    _ => String::new(),
-                })
+            sched.state.lock().await.get(identity).map(|e| match e {
+                Entry::State { value, .. } => value.clone(),
+                _ => String::new(),
+            })
         }
 
         sched.poll_page(&page).await.unwrap(); // 基线 A: 静默落盘, 不发送
@@ -967,16 +1109,21 @@ mod tests {
         let el = element("e");
         let page = page_with(3, vec![el.clone()]);
         let config = config_with("uc1", vec![page.clone()], vec![], 4);
-        let backend = MockBackend::pages(vec![fetched(vec![
-            (el.clone(), FetchResult::Ok { value: "充足".into() }),
-        ])]);
+        let backend = MockBackend::pages(vec![fetched(vec![(
+            el.clone(),
+            FetchResult::Ok {
+                value: "充足".into(),
+            },
+        )])]);
         let notifier = MockNotifier::new(vec![true]);
         let sched = setup("uc1", config, backend, notifier.clone());
-        sched
-            .state
-            .lock()
-            .await
-            .insert(el.identity(), Entry::State { value: "充足".into(), updated_at: "t0".into() });
+        sched.state.lock().await.insert(
+            el.identity(),
+            Entry::State {
+                value: "充足".into(),
+                updated_at: "t0".into(),
+            },
+        );
 
         sched.poll_page(&page).await.unwrap(); // 值未变化: 不通知
 
@@ -990,15 +1137,29 @@ mod tests {
         let page = page_with(3, vec![e1.clone(), e2.clone()]);
         let config = config_with("ms1", vec![page.clone()], vec![], 4);
         let backend = MockBackend::pages(vec![fetched(vec![
-            (e1.clone(), FetchResult::Ok { value: "充足".into() }),
-            (e2.clone(), FetchResult::Ok { value: "¥10".into() }),
+            (
+                e1.clone(),
+                FetchResult::Ok {
+                    value: "充足".into(),
+                },
+            ),
+            (
+                e2.clone(),
+                FetchResult::Ok {
+                    value: "¥10".into(),
+                },
+            ),
         ])]);
         let notifier = MockNotifier::new(vec![true]);
         let sched = setup("ms1", config, backend.clone(), notifier.clone());
 
         sched.poll_page(&page).await.unwrap();
 
-        assert_eq!(backend.page_calls.load(AtomicOrdering::SeqCst), 1, "两个元素只触发一次页面加载");
+        assert_eq!(
+            backend.page_calls.load(AtomicOrdering::SeqCst),
+            1,
+            "两个元素只触发一次页面加载"
+        );
         let state = sched.state.lock().await;
         assert!(matches!(
             state.get(&e1.identity()),
@@ -1019,8 +1180,18 @@ mod tests {
         let page = page_with(1, vec![ok.clone(), bad.clone()]);
         let config = config_with("mx1", vec![page.clone()], vec![], 4);
         let backend = MockBackend::pages(vec![fetched(vec![
-            (ok.clone(), FetchResult::Ok { value: "充足".into() }),
-            (bad.clone(), FetchResult::Error { reason: "boom".into() }),
+            (
+                ok.clone(),
+                FetchResult::Ok {
+                    value: "充足".into(),
+                },
+            ),
+            (
+                bad.clone(),
+                FetchResult::Error {
+                    reason: "boom".into(),
+                },
+            ),
         ])]);
         let notifier = MockNotifier::new(vec![true]);
         let sched = setup("mx1", config, backend, notifier.clone());
@@ -1029,15 +1200,27 @@ mod tests {
 
         // 成功元素: 落基线, 不告警
         let state = sched.state.lock().await;
-        assert!(matches!(state.get(&ok.identity()), Some(Entry::State { value, .. }) if value == "充足"));
+        assert!(
+            matches!(state.get(&ok.identity()), Some(Entry::State { value, .. }) if value == "充足")
+        );
         drop(state);
         // 失败元素: 达阈值发一条告警; 告警只针对失败元素
         assert_eq!(notifier.sent().len(), 1);
         assert!(notifier.sent()[0].contains(&bad.identity()));
         assert!(!notifier.sent()[0].contains(&ok.identity()));
         let failures = sched.elem_failures.lock().await;
-        assert!(!failures.get(&ok.identity()).map(|f| f.alerted).unwrap_or(false));
-        assert!(failures.get(&bad.identity()).map(|f| f.alerted).unwrap_or(false));
+        assert!(
+            !failures
+                .get(&ok.identity())
+                .map(|f| f.alerted)
+                .unwrap_or(false)
+        );
+        assert!(
+            failures
+                .get(&bad.identity())
+                .map(|f| f.alerted)
+                .unwrap_or(false)
+        );
     }
 
     // ---- 列表新条目监控 ----
@@ -1050,7 +1233,10 @@ mod tests {
     ) -> (Arc<Scheduler>, WatchTarget, Config) {
         let threshold = watch.failure_threshold;
         let config = Config {
-            telegram: TelegramConfig { bot_token: "x".into(), chat_id: "1".into() },
+            telegram: TelegramConfig {
+                bot_token: "x".into(),
+                chat_id: "1".into(),
+            },
             merchants: vec![],
             poll_interval_secs: 60,
             failure_threshold: threshold,
@@ -1067,15 +1253,10 @@ mod tests {
     }
 
     async fn seen_of(sched: &Scheduler, identity: &str) -> Option<Vec<String>> {
-        sched
-            .state
-            .lock()
-            .await
-            .get(identity)
-            .map(|e| match e {
-                Entry::SeenSet { seen_ids, .. } => seen_ids.clone(),
-                _ => vec![],
-            })
+        sched.state.lock().await.get(identity).map(|e| match e {
+            Entry::SeenSet { seen_ids, .. } => seen_ids.clone(),
+            _ => vec![],
+        })
     }
 
     #[tokio::test]
@@ -1091,15 +1272,24 @@ mod tests {
 
         assert!(notifier.sent().is_empty());
         let seen = seen_of(&sched, &watch.identity()).await.unwrap();
-        assert_eq!(seen.iter().cloned().collect::<std::collections::HashSet<_>>(), ["100", "101"].into_iter().map(String::from).collect());
+        assert_eq!(
+            seen.iter()
+                .cloned()
+                .collect::<std::collections::HashSet<_>>(),
+            ["100", "101"].into_iter().map(String::from).collect()
+        );
     }
 
     #[tokio::test]
     async fn test_watch_new_matching_post_notifies_and_records() {
         let watch = watch_named("NS", &["hk"], 1);
         let backend = MockBackend::lists(vec![
-            ListResult::Fetched { items: vec![item("100", "老帖")] },
-            ListResult::Fetched { items: vec![item("200", "HK 原生 IP"), item("100", "老帖")] },
+            ListResult::Fetched {
+                items: vec![item("100", "老帖")],
+            },
+            ListResult::Fetched {
+                items: vec![item("200", "HK 原生 IP"), item("100", "老帖")],
+            },
         ]);
         let notifier = MockNotifier::new(vec![true]);
         let (sched, watch, _config) = watch_setup("wb2", watch, backend, notifier.clone());
@@ -1113,7 +1303,9 @@ mod tests {
         assert!(notifier.sent()[0].contains("https://www.nodeseek.com/post-200-1"));
         let seen = seen_of(&sched, &watch.identity()).await.unwrap();
         assert_eq!(
-            seen.iter().cloned().collect::<std::collections::HashSet<_>>(),
+            seen.iter()
+                .cloned()
+                .collect::<std::collections::HashSet<_>>(),
             ["100", "200"].into_iter().map(String::from).collect()
         );
     }
@@ -1123,8 +1315,12 @@ mod tests {
         // 已见 ID 的帖被顶到列表首位（顺序变化）→ 不判为新帖、不推送。
         let watch = watch_named("NS", &["hk"], 1);
         let backend = MockBackend::lists(vec![
-            ListResult::Fetched { items: vec![item("100", "HK 老帖"), item("101", "其它")] },
-            ListResult::Fetched { items: vec![item("101", "其它"), item("100", "HK 老帖")] },
+            ListResult::Fetched {
+                items: vec![item("100", "HK 老帖"), item("101", "其它")],
+            },
+            ListResult::Fetched {
+                items: vec![item("101", "其它"), item("100", "HK 老帖")],
+            },
         ]);
         let notifier = MockNotifier::new(vec![true]);
         let (sched, watch, _config) = watch_setup("wb3", watch, backend, notifier.clone());
@@ -1139,9 +1335,15 @@ mod tests {
         // 新帖标题未命中 → 不通知但记入已见, 下轮不再判新。
         let watch = watch_named("NS", &["hk"], 1);
         let backend = MockBackend::lists(vec![
-            ListResult::Fetched { items: vec![item("100", "老帖")] },
-            ListResult::Fetched { items: vec![item("300", "美国 VPS"), item("100", "老帖")] },
-            ListResult::Fetched { items: vec![item("300", "美国 VPS"), item("100", "老帖")] },
+            ListResult::Fetched {
+                items: vec![item("100", "老帖")],
+            },
+            ListResult::Fetched {
+                items: vec![item("300", "美国 VPS"), item("100", "老帖")],
+            },
+            ListResult::Fetched {
+                items: vec![item("300", "美国 VPS"), item("100", "老帖")],
+            },
         ]);
         let notifier = MockNotifier::new(vec![true]);
         let (sched, watch, _config) = watch_setup("wb4", watch, backend, notifier.clone());
@@ -1149,7 +1351,12 @@ mod tests {
         sched.poll_watch(&watch).await.unwrap();
         sched.poll_watch(&watch).await.unwrap();
         assert!(notifier.sent().is_empty());
-        assert!(seen_of(&sched, &watch.identity()).await.unwrap().contains(&"300".to_string()));
+        assert!(
+            seen_of(&sched, &watch.identity())
+                .await
+                .unwrap()
+                .contains(&"300".to_string())
+        );
 
         sched.poll_watch(&watch).await.unwrap();
         assert!(notifier.sent().is_empty());
@@ -1160,9 +1367,15 @@ mod tests {
         // 命中新帖发送失败 → 不记入 ID; 下轮仍判新并重试直至成功。
         let watch = watch_named("NS", &["hk"], 1);
         let backend = MockBackend::lists(vec![
-            ListResult::Fetched { items: vec![item("100", "老帖")] },
-            ListResult::Fetched { items: vec![item("200", "HK 新帖"), item("100", "老帖")] },
-            ListResult::Fetched { items: vec![item("200", "HK 新帖"), item("100", "老帖")] },
+            ListResult::Fetched {
+                items: vec![item("100", "老帖")],
+            },
+            ListResult::Fetched {
+                items: vec![item("200", "HK 新帖"), item("100", "老帖")],
+            },
+            ListResult::Fetched {
+                items: vec![item("200", "HK 新帖"), item("100", "老帖")],
+            },
         ]);
         let notifier = MockNotifier::new(vec![false, true]);
         let (sched, watch, _config) = watch_setup("wb5", watch, backend, notifier.clone());
@@ -1170,11 +1383,21 @@ mod tests {
         sched.poll_watch(&watch).await.unwrap(); // 基线 {100}
         sched.poll_watch(&watch).await.unwrap(); // 200 发送失败 → 不记入
         assert_eq!(notifier.sent().len(), 1);
-        assert!(!seen_of(&sched, &watch.identity()).await.unwrap().contains(&"200".to_string()));
+        assert!(
+            !seen_of(&sched, &watch.identity())
+                .await
+                .unwrap()
+                .contains(&"200".to_string())
+        );
 
         sched.poll_watch(&watch).await.unwrap(); // 200 仍判新, 重试成功 → 记入
         assert_eq!(notifier.sent().len(), 2);
-        assert!(seen_of(&sched, &watch.identity()).await.unwrap().contains(&"200".to_string()));
+        assert!(
+            seen_of(&sched, &watch.identity())
+                .await
+                .unwrap()
+                .contains(&"200".to_string())
+        );
     }
 
     #[tokio::test]
@@ -1182,10 +1405,18 @@ mod tests {
         // 加载失败连续达阈值发一条、边沿触发不刷屏、成功后复位。
         let watch = watch_named("NS", &["hk"], 2);
         let backend = MockBackend::lists(vec![
-            ListResult::LoadError { reason: "boom".into() },
-            ListResult::LoadError { reason: "boom".into() },
-            ListResult::LoadError { reason: "boom".into() },
-            ListResult::Fetched { items: vec![item("100", "HK")] },
+            ListResult::LoadError {
+                reason: "boom".into(),
+            },
+            ListResult::LoadError {
+                reason: "boom".into(),
+            },
+            ListResult::LoadError {
+                reason: "boom".into(),
+            },
+            ListResult::Fetched {
+                items: vec![item("100", "HK")],
+            },
         ]);
         let notifier = MockNotifier::new(vec![true]);
         let (sched, watch, _config) = watch_setup("wb6", watch, backend, notifier.clone());
@@ -1230,7 +1461,9 @@ mod tests {
         // 一轮多个命中新帖各发一条；HK / hk 均命中（不区分大小写）。
         let watch = watch_named("NS", &["hk"], 1);
         let backend = MockBackend::lists(vec![
-            ListResult::Fetched { items: vec![item("100", "老帖")] },
+            ListResult::Fetched {
+                items: vec![item("100", "老帖")],
+            },
             ListResult::Fetched {
                 items: vec![
                     item("201", "HK 甲"),
@@ -1251,8 +1484,13 @@ mod tests {
         assert!(notifier.sent().iter().any(|m| m.contains("hk 丙")));
         let seen = seen_of(&sched, &watch.identity()).await.unwrap();
         assert_eq!(
-            seen.iter().cloned().collect::<std::collections::HashSet<_>>(),
-            ["100", "201", "202", "203"].into_iter().map(String::from).collect()
+            seen.iter()
+                .cloned()
+                .collect::<std::collections::HashSet<_>>(),
+            ["100", "201", "202", "203"]
+                .into_iter()
+                .map(String::from)
+                .collect()
         );
     }
 
@@ -1294,7 +1532,10 @@ mod tests {
         let page = page_with(3, vec![el.clone()]);
         let watch = watch_named("NS", &["hk"], 3);
         let config = Config {
-            telegram: TelegramConfig { bot_token: "x".into(), chat_id: "1".into() },
+            telegram: TelegramConfig {
+                bot_token: "x".into(),
+                chat_id: "1".into(),
+            },
             merchants: vec![Merchant {
                 name: "m".into(),
                 pages: vec![page.clone()],
@@ -1312,8 +1553,15 @@ mod tests {
             proxy: None,
         };
         let backend = MockBackend::dual(
-            fetched(vec![(el.clone(), FetchResult::Ok { value: "充足".into() })]),
-            ListResult::Fetched { items: vec![item("100", "HK 帖")] },
+            fetched(vec![(
+                el.clone(),
+                FetchResult::Ok {
+                    value: "充足".into(),
+                },
+            )]),
+            ListResult::Fetched {
+                items: vec![item("100", "HK 帖")],
+            },
         );
         let notifier = MockNotifier::new(vec![true]);
         let (sched, _stop) = Scheduler::new(config, backend, notifier.clone());
@@ -1323,14 +1571,26 @@ mod tests {
 
         assert!(notifier.sent().is_empty());
         let state = sched.state.lock().await;
-        assert!(matches!(state.get(&el.identity()), Some(Entry::State { value, .. }) if value == "充足"));
-        assert!(matches!(state.get(&watch.identity()), Some(Entry::SeenSet { .. })));
+        assert!(
+            matches!(state.get(&el.identity()), Some(Entry::State { value, .. }) if value == "充足")
+        );
+        assert!(matches!(
+            state.get(&watch.identity()),
+            Some(Entry::SeenSet { .. })
+        ));
     }
 
     // ---- run / reconcile ----
 
-    async fn start_scheduler(_tag: &str, config: Config) -> (Arc<Scheduler>, tokio::task::JoinHandle<()>) {
-        let (sched, _stop) = Scheduler::new(config, Arc::new(HangingBackend), MockNotifier::new(vec![true]));
+    async fn start_scheduler(
+        _tag: &str,
+        config: Config,
+    ) -> (Arc<Scheduler>, tokio::task::JoinHandle<()>) {
+        let (sched, _stop) = Scheduler::new(
+            config,
+            Arc::new(HangingBackend),
+            MockNotifier::new(vec![true]),
+        );
         let runner = tokio::spawn({
             let s = Arc::clone(&sched);
             async move { s.run().await }
@@ -1356,12 +1616,20 @@ mod tests {
 
     #[tokio::test]
     async fn test_run_registers_tasks_by_identity_key() {
-        let config = config_with("rk1", vec![page_named("p1", 60, vec![element("e")])], vec![watch_named("W1", &["hk"], 1)], 4);
+        let config = config_with(
+            "rk1",
+            vec![page_named("p1", 60, vec![element("e")])],
+            vec![watch_named("W1", &["hk"], 1)],
+            4,
+        );
         let (sched, runner) = start_scheduler("rk1", config).await;
 
         let mut keys = task_keys(&sched).await;
         keys.sort();
-        assert_eq!(keys, vec!["page:m / p1".to_string(), "watch:watch / W1".to_string()]);
+        assert_eq!(
+            keys,
+            vec!["page:m / p1".to_string(), "watch:watch / W1".to_string()]
+        );
 
         shutdown(&sched, runner).await;
         assert!(sched.tasks.lock().await.is_empty(), "停止后任务表清空");
@@ -1369,16 +1637,29 @@ mod tests {
 
     #[tokio::test]
     async fn test_reconcile_adds_and_removes() {
-        let config = config_with("ra1", vec![page_named("p1", 60, vec![element("e")])], vec![watch_named("W1", &["hk"], 1)], 4);
+        let config = config_with(
+            "ra1",
+            vec![page_named("p1", 60, vec![element("e")])],
+            vec![watch_named("W1", &["hk"], 1)],
+            4,
+        );
         let (sched, runner) = start_scheduler("ra1", config).await;
 
-        let new_config = config_with("ra1b", vec![page_named("p2", 60, vec![element("e")])], vec![watch_named("W2", &["hk"], 1)], 4);
+        let new_config = config_with(
+            "ra1b",
+            vec![page_named("p2", 60, vec![element("e")])],
+            vec![watch_named("W2", &["hk"], 1)],
+            4,
+        );
         let (added, removed) = sched.reconcile(new_config).await;
 
         assert_eq!((added, removed), (2, 2));
         let mut keys = task_keys(&sched).await;
         keys.sort();
-        assert_eq!(keys, vec!["page:m / p2".to_string(), "watch:watch / W2".to_string()]);
+        assert_eq!(
+            keys,
+            vec!["page:m / p2".to_string(), "watch:watch / W2".to_string()]
+        );
         shutdown(&sched, runner).await;
     }
 
@@ -1387,26 +1668,32 @@ mod tests {
         // 删掉一个页面时，其余页面原样继续——同一个 Task，未被连带取消。
         let config = config_with(
             "rr1",
-            vec![page_named("keep", 60, vec![element("e")]), page_named("drop", 60, vec![element("e")])],
+            vec![
+                page_named("keep", 60, vec![element("e")]),
+                page_named("drop", 60, vec![element("e")]),
+            ],
             vec![],
             4,
         );
         let (sched, runner) = start_scheduler("rr1", config).await;
-        let survivor_id = sched
-            .tasks
-            .lock()
-            .await
-            .get("page:m / keep")
-            .unwrap()
-            .id();
+        let survivor_id = sched.tasks.lock().await.get("page:m / keep").unwrap().id();
 
-        let new_config = config_with("rr1b", vec![page_named("keep", 60, vec![element("e")])], vec![], 4);
+        let new_config = config_with(
+            "rr1b",
+            vec![page_named("keep", 60, vec![element("e")])],
+            vec![],
+            4,
+        );
         let (added, removed) = sched.reconcile(new_config).await;
 
         assert_eq!((added, removed), (0, 1));
         let tasks = sched.tasks.lock().await;
         assert_eq!(tasks.len(), 1);
-        assert_eq!(tasks.get("page:m / keep").unwrap().id(), survivor_id, "存活任务未被重启");
+        assert_eq!(
+            tasks.get("page:m / keep").unwrap().id(),
+            survivor_id,
+            "存活任务未被重启"
+        );
         drop(tasks);
         shutdown(&sched, runner).await;
     }
@@ -1425,12 +1712,22 @@ mod tests {
             f.mark_alerted();
         }
 
-        let new_config = config_with("rk2b", vec![page_named("p1", 60, vec![element("e")])], vec![watch_named("W1", &["hk"], 1)], 4);
+        let new_config = config_with(
+            "rk2b",
+            vec![page_named("p1", 60, vec![element("e")])],
+            vec![watch_named("W1", &["hk"], 1)],
+            4,
+        );
         let (added, removed) = sched.reconcile(new_config).await;
 
         assert_eq!((added, removed), (0, 0));
         let failures = sched.page_failures.lock().await;
-        assert!(failures.get(&page.identity()).map(|f| f.alerted).unwrap_or(false));
+        assert!(
+            failures
+                .get(&page.identity())
+                .map(|f| f.alerted)
+                .unwrap_or(false)
+        );
         drop(failures);
         let watch_failures = sched.watch_failures.lock().await;
         assert!(watch_failures.contains_key(&watch.identity()));
@@ -1441,11 +1738,21 @@ mod tests {
     #[tokio::test]
     async fn test_reconcile_restarts_changed_target() {
         // 标识不变但内容变了（改了轮询间隔）→ 先撤后建，不计入增减。
-        let config = config_with("rc1", vec![page_named("p1", 60, vec![element("e")])], vec![], 4);
+        let config = config_with(
+            "rc1",
+            vec![page_named("p1", 60, vec![element("e")])],
+            vec![],
+            4,
+        );
         let (sched, runner) = start_scheduler("rc1", config).await;
         let old_id = sched.tasks.lock().await.get("page:m / p1").unwrap().id();
 
-        let new_config = config_with("rc1b", vec![page_named("p1", 30, vec![element("e")])], vec![], 4);
+        let new_config = config_with(
+            "rc1b",
+            vec![page_named("p1", 30, vec![element("e")])],
+            vec![],
+            4,
+        );
         let (added, removed) = sched.reconcile(new_config).await;
 
         assert_eq!((added, removed), (0, 0));
@@ -1466,13 +1773,30 @@ mod tests {
         let config = config_with("rp1", vec![page.clone()], vec![], 4);
         let (sched, runner) = start_scheduler("rp1", config.clone()).await;
         sched
-            .store(&keep.identity(), Entry::State { value: "留".into(), updated_at: "t".into() })
+            .store(
+                &keep.identity(),
+                Entry::State {
+                    value: "留".into(),
+                    updated_at: "t".into(),
+                },
+            )
             .await;
         sched
-            .store(&drop_el.identity(), Entry::State { value: "删".into(), updated_at: "t".into() })
+            .store(
+                &drop_el.identity(),
+                Entry::State {
+                    value: "删".into(),
+                    updated_at: "t".into(),
+                },
+            )
             .await;
 
-        let new_config = config_with("rp1b", vec![page_named("p1", 60, vec![keep.clone()])], vec![], 4);
+        let new_config = config_with(
+            "rp1b",
+            vec![page_named("p1", 60, vec![keep.clone()])],
+            vec![],
+            4,
+        );
         let (added, removed) = sched.reconcile(new_config).await;
 
         assert_eq!((added, removed), (0, 0), "页面标识未变，属于重启而非增减");
@@ -1481,12 +1805,14 @@ mod tests {
         assert!(elem_failures.contains_key(&keep.identity()));
         drop(elem_failures);
         let state = sched.state.lock().await;
-        assert!(state.get(&drop_el.identity()).is_none());
-        assert!(matches!(state.get(&keep.identity()), Some(Entry::State { value, .. }) if value == "留"));
+        assert!(!state.contains_key(&drop_el.identity()));
+        assert!(
+            matches!(state.get(&keep.identity()), Some(Entry::State { value, .. }) if value == "留")
+        );
         drop(state);
         // 清理必须落盘，否则重启后陈旧基线复活。
         let on_disk = load_state(PathBuf::from(&config.state_path).as_path());
-        assert!(on_disk.get(&drop_el.identity()).is_none());
+        assert!(!on_disk.contains_key(&drop_el.identity()));
         assert!(on_disk.contains_key(&keep.identity()));
         shutdown(&sched, runner).await;
     }
@@ -1496,7 +1822,10 @@ mod tests {
         // 删掉最后一个监控（零监控）也要成立：任务全撤、已见集合清空落盘。
         let watch = watch_named("W1", &["hk"], 1);
         let config = Config {
-            telegram: TelegramConfig { bot_token: "x".into(), chat_id: "1".into() },
+            telegram: TelegramConfig {
+                bot_token: "x".into(),
+                chat_id: "1".into(),
+            },
             merchants: vec![],
             poll_interval_secs: 60,
             failure_threshold: 1,
@@ -1510,11 +1839,20 @@ mod tests {
         };
         let (sched, runner) = start_scheduler("rp2", config.clone()).await;
         sched
-            .store(&watch.identity(), Entry::SeenSet { seen_ids: vec!["1".into(), "2".into()], updated_at: "t".into() })
+            .store(
+                &watch.identity(),
+                Entry::SeenSet {
+                    seen_ids: vec!["1".into(), "2".into()],
+                    updated_at: "t".into(),
+                },
+            )
             .await;
 
         let empty_config = Config {
-            telegram: TelegramConfig { bot_token: "x".into(), chat_id: "1".into() },
+            telegram: TelegramConfig {
+                bot_token: "x".into(),
+                chat_id: "1".into(),
+            },
             merchants: vec![],
             poll_interval_secs: 60,
             failure_threshold: 1,
@@ -1550,7 +1888,11 @@ mod tests {
 
         // 占满唯一额度，试抓应排队超时。
         let _permit = sched.semaphore.clone().acquire_owned().await.unwrap();
-        let result = tokio::time::timeout(std::time::Duration::from_millis(100), sched.trial_fetch_page(page)).await;
+        let result = tokio::time::timeout(
+            std::time::Duration::from_millis(100),
+            sched.trial_fetch_page(page),
+        )
+        .await;
         assert!(result.is_err(), "信号量占满时试抓应排队");
     }
 
@@ -1559,7 +1901,11 @@ mod tests {
         let page = page_named("p1", 60, vec![element("e")]);
         let watch = watch_named("W1", &["hk"], 1);
         let config = config_with("sn1", vec![page], vec![watch], 4);
-        let (sched, _stop) = Scheduler::new(config, Arc::new(HangingBackend), MockNotifier::new(vec![true]));
+        let (sched, _stop) = Scheduler::new(
+            config,
+            Arc::new(HangingBackend),
+            MockNotifier::new(vec![true]),
+        );
 
         let rows = sched.snapshot().await;
         assert_eq!(rows.len(), 2);

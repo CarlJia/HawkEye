@@ -3,7 +3,9 @@
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use hawkeye::configedit::{add_element, add_watch, remove_element, remove_watch, write_config, EditError};
+use hawkeye::configedit::{
+    EditError, add_element, add_watch, remove_element, remove_watch, write_config,
+};
 
 static COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -93,7 +95,14 @@ fn test_add_element_merges_existing_url() {
     let new = add_element(&raw, "https://yunyoo.cc/cart", "#b", None, None, None, None);
 
     assert_eq!(merchants(&new).len(), 2);
-    assert_eq!(merchants(&new)[0].get("pages").and_then(|v| v.as_array()).unwrap().len(), 1);
+    assert_eq!(
+        merchants(&new)[0]
+            .get("pages")
+            .and_then(|v| v.as_array())
+            .unwrap()
+            .len(),
+        1
+    );
     let selectors: Vec<&str> = elements_of(&new, 0)
         .iter()
         .map(|e| e.get("selector").and_then(|v| v.as_str()).unwrap())
@@ -105,15 +114,29 @@ fn test_add_element_merges_existing_url() {
 
 #[test]
 fn test_add_element_creates_host_merchant_for_new_url() {
-    let new = add_element(&base_raw(), "https://shop.example.com/x?a=1", "#c", None, None, None, None);
+    let new = add_element(
+        &base_raw(),
+        "https://shop.example.com/x?a=1",
+        "#c",
+        None,
+        None,
+        None,
+        None,
+    );
 
     let names: Vec<&str> = merchants(&new)
         .iter()
         .map(|m| m.get("name").and_then(|v| v.as_str()).unwrap())
         .collect();
     assert_eq!(names, vec!["yunyoo", "other", "shop.example.com"]);
-    let page = &merchants(&new)[2].get("pages").and_then(|v| v.as_array()).unwrap()[0];
-    assert_eq!(page.get("url").and_then(|v| v.as_str()), Some("https://shop.example.com/x?a=1"));
+    let page = &merchants(&new)[2]
+        .get("pages")
+        .and_then(|v| v.as_array())
+        .unwrap()[0];
+    assert_eq!(
+        page.get("url").and_then(|v| v.as_str()),
+        Some("https://shop.example.com/x?a=1")
+    );
     // 页面不写 name，交给缺省回退
     assert!(page.get("name").is_none());
     assert_eq!(
@@ -128,29 +151,67 @@ fn test_add_element_creates_host_merchant_for_new_url() {
 
 #[test]
 fn test_add_element_reuses_host_merchant() {
-    let new = add_element(&base_raw(), "https://shop.example.com/x", "#c", None, None, None, None);
-    let new = add_element(&new, "https://shop.example.com/y", "#d", None, None, None, None);
+    let new = add_element(
+        &base_raw(),
+        "https://shop.example.com/x",
+        "#c",
+        None,
+        None,
+        None,
+        None,
+    );
+    let new = add_element(
+        &new,
+        "https://shop.example.com/y",
+        "#d",
+        None,
+        None,
+        None,
+        None,
+    );
 
     let names: Vec<&str> = merchants(&new)
         .iter()
         .map(|m| m.get("name").and_then(|v| v.as_str()).unwrap())
         .collect();
     assert_eq!(names, vec!["yunyoo", "other", "shop.example.com"]);
-    assert_eq!(merchants(&new)[2].get("pages").and_then(|v| v.as_array()).unwrap().len(), 2);
+    assert_eq!(
+        merchants(&new)[2]
+            .get("pages")
+            .and_then(|v| v.as_array())
+            .unwrap()
+            .len(),
+        2
+    );
 }
 
 #[test]
 fn test_add_element_omits_name_and_nth() {
     let dir = tmp_dir();
     let p = write(BASE);
-    let new = add_element(&base_raw(), "https://yunyoo.cc/cart", "#b", None, None, None, None);
+    let new = add_element(
+        &base_raw(),
+        "https://yunyoo.cc/cart",
+        "#b",
+        None,
+        None,
+        None,
+        None,
+    );
     let element = &elements_of(&new, 0)[1];
     assert!(element.get("name").is_none());
     assert!(element.get("nth").is_none());
 
     let cfg = write_config(&p, &new).unwrap();
-    let identities: Vec<String> = cfg.pages()[0].elements.iter().map(|e| e.identity()).collect();
-    assert_eq!(identities, vec!["yunyoo / 购物车 / 商品A", "yunyoo / 购物车 / #b"]);
+    let identities: Vec<String> = cfg.pages()[0]
+        .elements
+        .iter()
+        .map(|e| e.identity())
+        .collect();
+    assert_eq!(
+        identities,
+        vec!["yunyoo / 购物车 / 商品A", "yunyoo / 购物车 / #b"]
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -193,7 +254,15 @@ fn test_add_element_writes_element_url_when_given() {
 #[test]
 fn test_add_element_on_config_without_merchants() {
     let p = write(ONLY_TELEGRAM);
-    let new = add_element(&toml::from_str(ONLY_TELEGRAM).unwrap(), "https://e.com/p", "#a", None, None, None, None);
+    let new = add_element(
+        &toml::from_str(ONLY_TELEGRAM).unwrap(),
+        "https://e.com/p",
+        "#a",
+        None,
+        None,
+        None,
+        None,
+    );
     let cfg = write_config(&p, &new).unwrap();
     assert_eq!(cfg.element_count(), 1);
     assert_eq!(cfg.merchants[0].name, "e.com");
@@ -205,11 +274,25 @@ fn test_add_element_on_config_without_merchants() {
 #[test]
 fn test_add_watch_appends_without_name() {
     let keywords = vec!["hk".to_string(), "HK".to_string()];
-    let new = add_watch(&base_raw(), "https://ns.com/", "ul li a", &keywords, None, None).unwrap();
+    let new = add_watch(
+        &base_raw(),
+        "https://ns.com/",
+        "ul li a",
+        &keywords,
+        None,
+        None,
+    )
+    .unwrap();
     let watches = new.get("watches").and_then(|v| v.as_array()).unwrap();
     assert_eq!(watches.len(), 1);
-    assert_eq!(watches[0].get("url").and_then(|v| v.as_str()), Some("https://ns.com/"));
-    assert_eq!(watches[0].get("link_selector").and_then(|v| v.as_str()), Some("ul li a"));
+    assert_eq!(
+        watches[0].get("url").and_then(|v| v.as_str()),
+        Some("https://ns.com/")
+    );
+    assert_eq!(
+        watches[0].get("link_selector").and_then(|v| v.as_str()),
+        Some("ul li a")
+    );
     assert!(watches[0].get("name").is_none());
 
     let p = write(BASE);
@@ -222,7 +305,15 @@ fn test_add_watch_appends_without_name() {
 #[test]
 fn test_add_watch_writes_name_when_given() {
     let keywords = vec!["hk".to_string()];
-    let new = add_watch(&base_raw(), "https://ns.com/", "a", &keywords, Some("NS 交易区"), None).unwrap();
+    let new = add_watch(
+        &base_raw(),
+        "https://ns.com/",
+        "a",
+        &keywords,
+        Some("NS 交易区"),
+        None,
+    )
+    .unwrap();
     assert_eq!(
         new.get("watches").and_then(|v| v.as_array()).unwrap()[0]
             .get("name")
@@ -234,7 +325,15 @@ fn test_add_watch_writes_name_when_given() {
 #[test]
 fn test_add_watch_writes_id_pattern_when_given() {
     let keywords = vec!["hk".to_string()];
-    let new = add_watch(&base_raw(), "https://ns.com/", "a", &keywords, None, Some(r"p-(\d+)")).unwrap();
+    let new = add_watch(
+        &base_raw(),
+        "https://ns.com/",
+        "a",
+        &keywords,
+        None,
+        Some(r"p-(\d+)"),
+    )
+    .unwrap();
     assert_eq!(
         new.get("watches").and_then(|v| v.as_array()).unwrap()[0]
             .get("id_pattern")
@@ -256,7 +355,15 @@ fn test_add_watch_duplicate_url_raises() {
 fn test_add_watch_on_config_without_watches() {
     let p = write(ONLY_TELEGRAM);
     let keywords = vec!["hk".to_string()];
-    let new = add_watch(&toml::from_str(ONLY_TELEGRAM).unwrap(), "https://ns.com/", "a", &keywords, None, None).unwrap();
+    let new = add_watch(
+        &toml::from_str(ONLY_TELEGRAM).unwrap(),
+        "https://ns.com/",
+        "a",
+        &keywords,
+        None,
+        None,
+    )
+    .unwrap();
     let cfg = write_config(&p, &new).unwrap();
     assert_eq!(cfg.watches.len(), 1);
     let _ = std::fs::remove_dir_all(p.parent().unwrap());
@@ -278,18 +385,37 @@ fn test_remove_element_prunes_empty_page_and_merchant() {
 
 #[test]
 fn test_remove_element_keeps_siblings() {
-    let raw = add_element(&base_raw(), "https://yunyoo.cc/cart", "#b", None, None, None, None);
+    let raw = add_element(
+        &base_raw(),
+        "https://yunyoo.cc/cart",
+        "#b",
+        None,
+        None,
+        None,
+        None,
+    );
     let new = remove_element(&raw, "yunyoo / 购物车 / #b").unwrap();
 
     assert_eq!(merchants(&new).len(), 2);
     let elements = elements_of(&new, 0);
     assert_eq!(elements.len(), 1);
-    assert_eq!(elements[0].get("name").and_then(|v| v.as_str()), Some("商品A"));
+    assert_eq!(
+        elements[0].get("name").and_then(|v| v.as_str()),
+        Some("商品A")
+    );
 }
 
 #[test]
 fn test_remove_element_identity_with_nth_fallback() {
-    let raw = add_element(&base_raw(), "https://yunyoo.cc/cart", ".s", None, Some(1), None, None);
+    let raw = add_element(
+        &base_raw(),
+        "https://yunyoo.cc/cart",
+        ".s",
+        None,
+        Some(1),
+        None,
+        None,
+    );
     let new = remove_element(&raw, "yunyoo / 购物车 / .s#1").unwrap();
     assert_eq!(elements_of(&new, 0).len(), 1);
 }

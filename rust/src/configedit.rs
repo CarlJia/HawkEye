@@ -13,7 +13,7 @@ use std::path::Path;
 
 use chrono::Local;
 
-use crate::config::{parse_config, Config, ConfigError};
+use crate::config::{Config, ConfigError, parse_config};
 
 const BACKUP_KEEP: usize = 10;
 
@@ -38,19 +38,22 @@ fn merchant_name(merchant: &toml::Value) -> String {
 }
 
 fn page_name(page: &toml::Value) -> String {
-    if let Some(name) = page.get("name").and_then(|v| v.as_str()) {
-        if !name.is_empty() {
-            return name.to_string();
-        }
+    if let Some(name) = page.get("name").and_then(|v| v.as_str())
+        && !name.is_empty()
+    {
+        return name.to_string();
     }
-    page.get("url").and_then(|v| v.as_str()).unwrap_or("").to_string()
+    page.get("url")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string()
 }
 
 fn element_name(element: &toml::Value) -> String {
-    if let Some(name) = element.get("name").and_then(|v| v.as_str()) {
-        if !name.is_empty() {
-            return name.to_string();
-        }
+    if let Some(name) = element.get("name").and_then(|v| v.as_str())
+        && !name.is_empty()
+    {
+        return name.to_string();
     }
     let sel = element
         .get("selector")
@@ -118,10 +121,7 @@ pub fn add_element(
     let element = toml::Value::Table(element);
 
     // URL 命中已有页面 → 并入。
-    if let Some(merchants) = new
-        .get_mut("merchants")
-        .and_then(|v| v.as_array_mut())
-    {
+    if let Some(merchants) = new.get_mut("merchants").and_then(|v| v.as_array_mut()) {
         for merchant in merchants.iter_mut() {
             if let Some(pages) = merchant.get_mut("pages").and_then(|v| v.as_array_mut()) {
                 for page in pages.iter_mut() {
@@ -146,11 +146,7 @@ pub fn add_element(
     let host_name = url::Url::parse(url)
         .ok()
         .and_then(|u| u.host_str().map(|h| h.to_string()))
-        .or_else(|| {
-            url::Url::parse(url)
-                .ok()
-                .map(|u| u.authority().to_string())
-        })
+        .or_else(|| url::Url::parse(url).ok().map(|u| u.authority().to_string()))
         .unwrap_or_else(|| url.to_string());
 
     let merchants = new
@@ -173,7 +169,9 @@ pub fn add_element(
             m.insert("pages".into(), toml::Value::Array(Vec::new()));
             merchants_arr.push(toml::Value::Table(m));
             let last = merchants_arr.len() - 1;
-            merchants_arr[last].as_table_mut().expect("merchant is table")
+            merchants_arr[last]
+                .as_table_mut()
+                .expect("merchant is table")
         }
     };
     let pages = target
@@ -209,7 +207,10 @@ pub fn add_watch(
     }
     let mut entry = toml::Table::new();
     entry.insert("url".into(), toml::Value::String(url.to_string()));
-    entry.insert("link_selector".into(), toml::Value::String(link_selector.to_string()));
+    entry.insert(
+        "link_selector".into(),
+        toml::Value::String(link_selector.to_string()),
+    );
     entry.insert(
         "keywords".into(),
         toml::Value::Array(
@@ -223,7 +224,10 @@ pub fn add_watch(
         entry.insert("name".into(), toml::Value::String(name.to_string()));
     }
     if let Some(id_pattern) = id_pattern {
-        entry.insert("id_pattern".into(), toml::Value::String(id_pattern.to_string()));
+        entry.insert(
+            "id_pattern".into(),
+            toml::Value::String(id_pattern.to_string()),
+        );
     }
     let watches = new
         .entry("watches")
@@ -311,12 +315,18 @@ pub fn tighten_permissions(path: &Path) {
     #[cfg(not(unix))]
     {
         // 非 POSIX 平台收紧权限属于尽力而为，此处仅提示。
-        tracing::warn!("非 POSIX 平台，请自行确认 {} 不在共享目录里", path.display());
+        tracing::warn!(
+            "非 POSIX 平台，请自行确认 {} 不在共享目录里",
+            path.display()
+        );
     }
 }
 
 fn unique_backup_path(config_path: &Path, ts: &str) -> std::path::PathBuf {
-    let name = config_path.file_name().unwrap_or_default().to_string_lossy();
+    let name = config_path
+        .file_name()
+        .unwrap_or_default()
+        .to_string_lossy();
     let base = config_path.with_file_name(format!("{name}.bak.{ts}"));
     if !base.exists() {
         return base;
@@ -332,10 +342,15 @@ fn unique_backup_path(config_path: &Path, ts: &str) -> std::path::PathBuf {
 }
 
 fn prune_backups(config_path: &Path) {
-    let Some(parent) = config_path.parent() else { return };
+    let Some(parent) = config_path.parent() else {
+        return;
+    };
     let prefix = format!(
         "{}.bak.",
-        config_path.file_name().unwrap_or_default().to_string_lossy()
+        config_path
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
     );
     let mut backups: Vec<_> = std::fs::read_dir(parent)
         .into_iter()
@@ -358,7 +373,7 @@ fn prune_backups(config_path: &Path) {
             Some((mtime, e.path()))
         })
         .collect();
-    backups.sort_by(|a, b| b.0.cmp(&a.0));
+    backups.sort_by_key(|b| std::cmp::Reverse(b.0));
     for (_, old) in backups.into_iter().skip(BACKUP_KEEP) {
         if let Err(e) = std::fs::remove_file(&old) {
             tracing::warn!("清理旧备份 {} 失败：{e}", old.display());
@@ -393,21 +408,26 @@ fn make_backup(config_path: &Path) -> std::io::Result<()> {
 
 /// 把变换后的 raw table 以「先验证、后替换」事务写回，返回新 Config（唯一写入口）。
 pub fn write_config(path: &Path, new_raw: &toml::Table) -> Result<Config, EditError> {
-    let text = toml::to_string_pretty(new_raw)
-        .map_err(|e| EditError(format!("配置序列化失败：{e}")))?;
+    let text =
+        toml::to_string_pretty(new_raw).map_err(|e| EditError(format!("配置序列化失败：{e}")))?;
 
     // ① 序列化结果必须既可解析又语义合法；失败即抛，此时原文件尚未被触碰。
-    let reparsed: toml::Table = toml::from_str(&text)
-        .map_err(|e| EditError(format!("改写后的配置未通过校验，已放弃写入（原文件未改动）：{e}")))?;
+    let reparsed: toml::Table = toml::from_str(&text).map_err(|e| {
+        EditError(format!(
+            "改写后的配置未通过校验，已放弃写入（原文件未改动）：{e}"
+        ))
+    })?;
     let config = parse_config(&reparsed).map_err(|e| {
-        EditError(format!("改写后的配置未通过校验，已放弃写入（原文件未改动）：{e}"))
+        EditError(format!(
+            "改写后的配置未通过校验，已放弃写入（原文件未改动）：{e}"
+        ))
     })?;
 
     // ② 备份原文件（600、留最近 10 份）。
-    if path.exists() {
-        if let Err(e) = make_backup(path) {
-            return Err(EditError(format!("备份原配置失败：{e}")));
-        }
+    if path.exists()
+        && let Err(e) = make_backup(path)
+    {
+        return Err(EditError(format!("备份原配置失败：{e}")));
     }
 
     // ③ 写 .tmp（600）→ 原子替换。必须先删除残留 tmp，否则 create_new 会永远失败。
@@ -466,21 +486,28 @@ mod tests {
         let merchants = new.get("merchants").unwrap().as_array().unwrap();
         assert_eq!(merchants[0].get("name").unwrap().as_str(), Some("a.com"));
         let pages = merchants[0].get("pages").unwrap().as_array().unwrap();
-        assert_eq!(pages[0].get("url").unwrap().as_str(), Some("https://a.com/p"));
+        assert_eq!(
+            pages[0].get("url").unwrap().as_str(),
+            Some("https://a.com/p")
+        );
     }
 
     #[test]
     fn test_add_element_merge_existing_page() {
         let raw = empty_raw();
         let raw = add_element(&raw, "https://a.com/p", "#x", None, None, None, None);
-        let new = add_element(&raw, "https://a.com/p", "#y", Some("第二个"), None, None, None);
+        let new = add_element(
+            &raw,
+            "https://a.com/p",
+            "#y",
+            Some("第二个"),
+            None,
+            None,
+            None,
+        );
         let merchants = new.get("merchants").unwrap().as_array().unwrap();
         assert_eq!(merchants.len(), 1);
-        let elements = merchants[0]
-            .get("pages")
-            .unwrap()
-            .as_array()
-            .unwrap()[0]
+        let elements = merchants[0].get("pages").unwrap().as_array().unwrap()[0]
             .get("elements")
             .unwrap()
             .as_array()
@@ -492,8 +519,23 @@ mod tests {
     #[test]
     fn test_add_watch_rejects_duplicate_url() {
         let raw = empty_raw();
-        let raw = add_watch(&raw, "https://f.com", "a.title", &["kw".to_string()], None, None).unwrap();
-        let err = add_watch(&raw, "https://f.com", "a.title", &["kw".to_string()], None, None);
+        let raw = add_watch(
+            &raw,
+            "https://f.com",
+            "a.title",
+            &["kw".to_string()],
+            None,
+            None,
+        )
+        .unwrap();
+        let err = add_watch(
+            &raw,
+            "https://f.com",
+            "a.title",
+            &["kw".to_string()],
+            None,
+            None,
+        );
         assert!(err.is_err());
     }
 

@@ -1,6 +1,7 @@
 //! 真实浏览器冒烟测试：起 Chromium → 打开本地 HTML → CSS/XPath/JS 提取 → 列表提取。
 //!
-//! 覆盖 Python tests/test_extract.py 中依赖真实页面渲染的核心场景（夹具同源）。
+//! 覆盖原 Python tests/test_extract.py 中依赖真实页面渲染的核心场景（夹具已随
+//! Rust 迁移搬到 rust/tests/fixtures/）。
 //! 需要本机有 Chrome 或 Playwright chromium，标记 ignore 避免常规 `cargo test`
 //! 拉起浏览器；显式 `cargo test --test browser_smoke -- --ignored` 触发。
 //! 多个用例共用 chromiumoxide 的默认 profile 目录，必须串行：
@@ -15,8 +16,8 @@ use hawkeye::config::{
 };
 use hawkeye::fetch::{BrowserManager, FetchResult, ListResult, PageResult};
 
-const YUNYOO_SAMPLE: &str = include_str!("../../tests/fixtures/yunyoo_sample.html");
-const NODESEEK_SAMPLE: &str = include_str!("../../tests/fixtures/nodeseek_sample.html");
+const YUNYOO_SAMPLE: &str = include_str!("fixtures/yunyoo_sample.html");
+const NODESEEK_SAMPLE: &str = include_str!("fixtures/nodeseek_sample.html");
 
 /// 阻塞式 HTTP 服务必须跑在独立线程：冒烟测试用单线程 tokio runtime，
 /// 若占用唯一执行线程会让浏览器启动的 future 永远得不到调度。
@@ -65,7 +66,9 @@ fn serve_header_echo() -> String {
                 req.lines()
                     .find_map(|l| {
                         let (k, v) = l.split_once(':')?;
-                        k.trim().eq_ignore_ascii_case(name).then(|| v.trim().to_string())
+                        k.trim()
+                            .eq_ignore_ascii_case(name)
+                            .then(|| v.trim().to_string())
                     })
                     .unwrap_or_else(|| format!("({name} 缺失)"))
             };
@@ -150,9 +153,23 @@ async fn browser_smoke_extract_and_list() {
             // nth=1 折叠空白
             element("yunyoo", "购物车", "第二个", ".status", Some(1), None),
             // XPath
-            element("yunyoo", "购物车", "XPath", "//*[@id=\"yy-cart-page\"]/main/article[1]/div", None, None),
+            element(
+                "yunyoo",
+                "购物车",
+                "XPath",
+                "//*[@id=\"yy-cart-page\"]/main/article[1]/div",
+                None,
+                None,
+            ),
             // JS 模式
-            element("yunyoo", "购物车", "JS", ".status", None, Some("el => el.textContent.trim() + '!'")),
+            element(
+                "yunyoo",
+                "购物车",
+                "JS",
+                ".status",
+                None,
+                Some("el => el.textContent.trim() + '!'"),
+            ),
             // stealth 生效性：init script 在页面加载前注入，navigator.webdriver 不为 true
             element(
                 "yunyoo",
@@ -172,9 +189,12 @@ async fn browser_smoke_extract_and_list() {
     };
 
     eprintln!("[smoke] 开始 fetch_page……");
-    let fetch_result = tokio::time::timeout(std::time::Duration::from_secs(90), manager.fetch_page(&page))
-        .await
-        .expect("fetch_page 超时");
+    let fetch_result = tokio::time::timeout(
+        std::time::Duration::from_secs(90),
+        manager.fetch_page(&page),
+    )
+    .await
+    .expect("fetch_page 超时");
     eprintln!("[smoke] fetch_page 完成");
     match fetch_result {
         PageResult::Fetched { results } => {
@@ -185,12 +205,43 @@ async fn browser_smoke_extract_and_list() {
                     .map(|(_, r)| r.clone())
                     .unwrap()
             };
-            assert_eq!(get("库存"), FetchResult::Ok { value: "充足".into() }, "CSS 首个匹配");
-            assert_eq!(get("第二个"), FetchResult::Ok { value: "较少".into() }, "nth=1");
-            assert_eq!(get("XPath"), FetchResult::Ok { value: "充足".into() }, "XPath");
-            assert_eq!(get("JS"), FetchResult::Ok { value: "充足!".into() }, "JS 模式");
-            assert_eq!(get("stealth"), FetchResult::Ok { value: "OK".into() }, "stealth 注入");
-            assert!(matches!(get("不存在"), FetchResult::NoMatch { .. }), "未匹配");
+            assert_eq!(
+                get("库存"),
+                FetchResult::Ok {
+                    value: "充足".into()
+                },
+                "CSS 首个匹配"
+            );
+            assert_eq!(
+                get("第二个"),
+                FetchResult::Ok {
+                    value: "较少".into()
+                },
+                "nth=1"
+            );
+            assert_eq!(
+                get("XPath"),
+                FetchResult::Ok {
+                    value: "充足".into()
+                },
+                "XPath"
+            );
+            assert_eq!(
+                get("JS"),
+                FetchResult::Ok {
+                    value: "充足!".into()
+                },
+                "JS 模式"
+            );
+            assert_eq!(
+                get("stealth"),
+                FetchResult::Ok { value: "OK".into() },
+                "stealth 注入"
+            );
+            assert!(
+                matches!(get("不存在"), FetchResult::NoMatch { .. }),
+                "未匹配"
+            );
             let empty = get("空节点");
             match &empty {
                 FetchResult::NoMatch { reason } => {
@@ -269,7 +320,14 @@ async fn browser_smoke_ua_consistent_across_http_and_js_layers() {
                 None,
                 Some("el => navigator.userAgent"),
             ),
-            element("echo", "请求头回显", "HTTP Accept-Language 头", "#al", None, None),
+            element(
+                "echo",
+                "请求头回显",
+                "HTTP Accept-Language 头",
+                "#al",
+                None,
+                None,
+            ),
             element(
                 "echo",
                 "请求头回显",

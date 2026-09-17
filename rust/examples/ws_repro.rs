@@ -44,7 +44,10 @@ async fn main() {
         .init();
 
     let config = Config {
-        telegram: TelegramConfig { bot_token: "t".into(), chat_id: "c".into() },
+        telegram: TelegramConfig {
+            bot_token: "t".into(),
+            chat_id: "c".into(),
+        },
         merchants: vec![],
         poll_interval_secs: 60,
         failure_threshold: 3,

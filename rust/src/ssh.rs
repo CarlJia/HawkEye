@@ -59,9 +59,9 @@ pub fn validate_safe(value: &str, allow_colon: bool) -> Result<(), String> {
     if value.is_empty() {
         return Err("值不能为空".to_string());
     }
-    let ok = value
-        .chars()
-        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-') || (allow_colon && c == ':'));
+    let ok = value.chars().all(|c| {
+        c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-') || (allow_colon && c == ':')
+    });
     if !ok {
         return Err(format!("值含非法字符：{value:?}"));
     }
@@ -125,7 +125,12 @@ fn ensure_known_hosts_dir(path: &Path) -> std::io::Result<()> {
 }
 
 /// 合成一条 known_hosts 条目；非 22 端口写成 `[host]:port`。
-pub fn make_known_hosts_entry(host: &str, port: u16, key_type: &str, key_base64: &str) -> Result<String, String> {
+pub fn make_known_hosts_entry(
+    host: &str,
+    port: u16,
+    key_type: &str,
+    key_base64: &str,
+) -> Result<String, String> {
     validate_safe(host, true)?;
     if port == DEFAULT_SSH_PORT {
         Ok(format!("{host} {key_type} {key_base64}\n"))
@@ -169,25 +174,34 @@ pub fn fingerprint_from_known_hosts_line(line: &str) -> Option<String> {
     }
     let key_type = parts[parts.len() - 2];
     let key_b64 = parts[parts.len() - 1];
-    let key_bytes = base64::engine::general_purpose::STANDARD.decode(key_b64).ok()?;
+    let key_bytes = base64::engine::general_purpose::STANDARD
+        .decode(key_b64)
+        .ok()?;
     Some(compute_fingerprint(key_type, &key_bytes))
 }
 
 /// 追加一条；末尾无换行先补一个，避免把上一行弄坏。
 pub fn append_known_hosts(path: &Path, entry: &str) -> Result<(), SshError> {
-    ensure_known_hosts_dir(path).map_err(|e| SshError::other(format!("准备 known_hosts 失败：{e}")))?;
-    if path.exists() {
-        if let Ok(data) = std::fs::read(path) {
-            if !data.is_empty() && data.last() != Some(&b'\n') {
-                use std::io::Write;
-                let mut f = std::fs::OpenOptions::new().append(true).open(path)
-                    .map_err(|e| SshError::other(format!("追加 known_hosts 失败：{e}")))?;
-                f.write_all(b"\n").map_err(|e| SshError::other(format!("追加 known_hosts 失败：{e}")))?;
-            }
-        }
+    ensure_known_hosts_dir(path)
+        .map_err(|e| SshError::other(format!("准备 known_hosts 失败：{e}")))?;
+    if path.exists()
+        && let Ok(data) = std::fs::read(path)
+        && !data.is_empty()
+        && data.last() != Some(&b'\n')
+    {
+        use std::io::Write;
+        let mut f = std::fs::OpenOptions::new()
+            .append(true)
+            .open(path)
+            .map_err(|e| SshError::other(format!("追加 known_hosts 失败：{e}")))?;
+        f.write_all(b"\n")
+            .map_err(|e| SshError::other(format!("追加 known_hosts 失败：{e}")))?;
     }
     use std::io::Write;
-    let mut f = std::fs::OpenOptions::new().append(true).create(true).open(path)
+    let mut f = std::fs::OpenOptions::new()
+        .append(true)
+        .create(true)
+        .open(path)
         .map_err(|e| SshError::other(format!("追加 known_hosts 失败：{e}")))?;
     f.write_all(entry.as_bytes())
         .map_err(|e| SshError::other(format!("追加 known_hosts 失败：{e}")))?;
@@ -271,12 +285,16 @@ pub async fn confirm_or_skip(
         .map(|k| k.public_key_bytes())
         .unwrap_or_default();
     let new_fingerprint = compute_fingerprint(&key_type, &public_key_bytes);
-    let new_entry = make_known_hosts_entry(host, port, &key_type, &key_b64)
-        .map_err(SshError::other)?;
+    let new_entry =
+        make_known_hosts_entry(host, port, &key_type, &key_b64).map_err(SshError::other)?;
 
     if let Some(existing_line) = lookup_known_hosts(known_hosts_path, host, port) {
         let existing_b64 = existing_line.split_whitespace().last().unwrap_or("");
-        let new_b64_part = new_entry.trim_end_matches('\n').split_whitespace().last().unwrap_or("");
+        let new_b64_part = new_entry
+            .trim_end_matches('\n')
+            .split_whitespace()
+            .last()
+            .unwrap_or("");
         if existing_b64 == new_b64_part {
             return Ok(()); // 密钥一致：什么都不做
         }
@@ -338,7 +356,9 @@ impl SshConnection {
         // 2) 带校验重连 + 密码鉴权。
         let (_, key_b64) = fetch_server_host_key(host, port).await?;
         let config = Arc::new(russh::client::Config::default());
-        let handler = VerifyHandler { expected_b64: key_b64 };
+        let handler = VerifyHandler {
+            expected_b64: key_b64,
+        };
         let mut handle = russh::client::connect(config, (host, port), handler)
             .await
             .map_err(|e| SshError::other(format!("连接 {host}:{port} 失败：{e}")))?;
@@ -409,12 +429,16 @@ impl SshConnection {
         Self::drain_channel(channel).await
     }
 
-    async fn drain_channel(mut channel: Channel<russh::client::Msg>) -> Result<RunResult, SshError> {
+    async fn drain_channel(
+        mut channel: Channel<russh::client::Msg>,
+    ) -> Result<RunResult, SshError> {
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
         let mut exit_status: Option<i32> = None;
         loop {
-            let Some(msg) = channel.wait().await else { break };
+            let Some(msg) = channel.wait().await else {
+                break;
+            };
             match msg {
                 ChannelMsg::Data { ref data } => stdout.extend_from_slice(data),
                 ChannelMsg::ExtendedData { ref data, .. } => stderr.extend_from_slice(data),
@@ -454,7 +478,9 @@ impl SshConnection {
         }
 
         // 3) sudo -S -p '' true（喂密码）；不申请 pty，写完立刻 EOF
-        let r = self.run_with_stdin("sudo -S -p '' true", &format!("{password}\n")).await?;
+        let r = self
+            .run_with_stdin("sudo -S -p '' true", &format!("{password}\n"))
+            .await?;
         if r.exit_status != 0 {
             return Err(SshError::Sudo(
                 "远端提权失败：免密 sudo 不可用，且用 SSH 密码喂 sudo 也未成功。\
@@ -531,8 +557,13 @@ impl SshConnection {
     ) -> Result<String, SshError> {
         validate_safe(script_basename, false).map_err(SshError::other)?;
         let remote_script = format!("{}/{}", remote_dir.trim_end_matches('/'), script_basename);
-        self.upload_part_then_rename(&remote_script, script_content.as_bytes(), Some(0o700), false)
-            .await?;
+        self.upload_part_then_rename(
+            &remote_script,
+            script_content.as_bytes(),
+            Some(0o700),
+            false,
+        )
+        .await?;
         let cmd = format!("bash {}", shell_quote(&remote_script));
         let result = self.run(&cmd).await?;
         let output = format!("{}{}", result.stdout, result.stderr);
@@ -549,7 +580,11 @@ impl RunResult {
             Err(format!(
                 "退出码 {}；stderr: {}",
                 self.exit_status,
-                if self.stderr.trim().is_empty() { "(无)" } else { self.stderr.trim() }
+                if self.stderr.trim().is_empty() {
+                    "(无)"
+                } else {
+                    self.stderr.trim()
+                }
             ))
         }
     }
@@ -563,7 +598,10 @@ mod tests {
     fn test_validate_safe() {
         assert!(validate_safe("example.com", false).is_ok());
         assert!(validate_safe("user-01", false).is_ok());
-        assert!(validate_safe("fe80::1", true).is_ok(), "host 允许冒号（IPv6）");
+        assert!(
+            validate_safe("fe80::1", true).is_ok(),
+            "host 允许冒号（IPv6）"
+        );
         assert!(validate_safe("host:2222", false).is_err(), "默认不允许冒号");
         assert!(validate_safe("", false).is_err());
         assert!(validate_safe("a;b", false).is_err());
@@ -583,7 +621,11 @@ mod tests {
         let fp = compute_fingerprint("ssh-ed25519", b"some-key-bytes");
         assert!(fp.starts_with("SHA256:"));
         assert!(!fp.ends_with('='), "base64 不带 padding");
-        assert!(!fp.contains('+') || true);
+        // ssh-keygen 用标准 base64（字母数字 + /），不是 urlsafe（- _）。
+        assert!(
+            !fp.contains('-') && !fp.contains('_'),
+            "标准 base64 而非 urlsafe"
+        );
     }
 
     #[test]
@@ -600,7 +642,8 @@ mod tests {
     }
 
     fn kh_path(tag: &str) -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!("hawkeye_kh_test_{}_{}", std::process::id(), tag));
+        let dir =
+            std::env::temp_dir().join(format!("hawkeye_kh_test_{}_{}", std::process::id(), tag));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir.join("known_hosts")
@@ -614,7 +657,11 @@ mod tests {
             lookup_known_hosts(&p, "e.com", 22),
             Some("e.com ssh-ed25519 AAA".to_string())
         );
-        assert_eq!(lookup_known_hosts(&p, "e.com", 2222), None, "端口不同不命中");
+        assert_eq!(
+            lookup_known_hosts(&p, "e.com", 2222),
+            None,
+            "端口不同不命中"
+        );
         assert_eq!(lookup_known_hosts(&p, "none.com", 22), None);
         assert_eq!(
             lookup_known_hosts(&p, "other.com", 22),
@@ -633,8 +680,15 @@ mod tests {
             fingerprint_from_known_hosts_line(&line),
             Some(compute_fingerprint("ssh-ed25519", key_bytes))
         );
-        assert_eq!(fingerprint_from_known_hosts_line("e.com ssh-ed25519"), None, "缺字段");
-        assert_eq!(fingerprint_from_known_hosts_line("e.com k !!!not-base64!!!"), None);
+        assert_eq!(
+            fingerprint_from_known_hosts_line("e.com ssh-ed25519"),
+            None,
+            "缺字段"
+        );
+        assert_eq!(
+            fingerprint_from_known_hosts_line("e.com k !!!not-base64!!!"),
+            None
+        );
     }
 
     #[test]

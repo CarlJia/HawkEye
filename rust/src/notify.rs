@@ -49,7 +49,13 @@ fn first_line(s: &str) -> String {
 }
 
 /// 变更通知文本，包含 旧值 → 新值。url 非空时附在最后一行。
-pub fn format_change_message(name: &str, old: &str, new: &str, when: &str, url: Option<&str>) -> String {
+pub fn format_change_message(
+    name: &str,
+    old: &str,
+    new: &str,
+    when: &str,
+    url: Option<&str>,
+) -> String {
     let mut lines = vec![
         format!("【变更】{name}"),
         format!("{old} → {new}"),
@@ -62,7 +68,13 @@ pub fn format_change_message(name: &str, old: &str, new: &str, when: &str, url: 
 }
 
 /// 连续失败告警文本。url 非空时附在最后一行。
-pub fn format_failure_message(name: &str, threshold: i64, reason: &str, when: &str, url: Option<&str>) -> String {
+pub fn format_failure_message(
+    name: &str,
+    threshold: i64,
+    reason: &str,
+    when: &str,
+    url: Option<&str>,
+) -> String {
     let mut lines = vec![
         format!("【异常】{name}"),
         format!("连续 {threshold} 次抓取失败"),
@@ -204,7 +216,10 @@ impl Notifier {
                 first_line(&body)
             )));
         }
-        tracing::warn!("Telegram 自检返回 {status}，继续启动：{}", first_line(&body));
+        tracing::warn!(
+            "Telegram 自检返回 {status}，继续启动：{}",
+            first_line(&body)
+        );
         Ok(())
     }
 
@@ -227,11 +242,7 @@ impl Notifier {
         {
             Ok((200, body)) => serde_json::from_str::<serde_json::Value>(&body)
                 .ok()
-                .and_then(|v| {
-                    v.get("result")
-                        .and_then(|r| r.as_array())
-                        .cloned()
-                }),
+                .and_then(|v| v.get("result").and_then(|r| r.as_array()).cloned()),
             Ok(_) => None,
             Err(e) => {
                 tracing::warn!("Telegram 快捷菜单同步失败（网络异常）：{e}");
@@ -259,7 +270,10 @@ impl Notifier {
             }
         };
         if status != 200 {
-            tracing::warn!("Telegram 快捷菜单同步失败（{status}）：{}", first_line(&body));
+            tracing::warn!(
+                "Telegram 快捷菜单同步失败（{status}）：{}",
+                first_line(&body)
+            );
             return format!("快捷菜单同步失败：Telegram 返回 {status}。稍后发送 /menu 可重试。");
         }
         tracing::info!("Telegram 快捷菜单已同步：{} 个命令", desired.len());
@@ -284,17 +298,18 @@ impl Notifier {
                         );
                         return false;
                     }
-                    tracing::warn!("Telegram 返回非 200（第 {attempt} 次）：{status} {}", first_line(&body));
+                    tracing::warn!(
+                        "Telegram 返回非 200（第 {attempt} 次）：{status} {}",
+                        first_line(&body)
+                    );
                 }
                 Err(e) => {
                     tracing::warn!("Telegram 请求异常（第 {attempt} 次）：{e}");
                 }
             }
             if attempt < MAX_ATTEMPTS {
-                tokio::time::sleep(Duration::from_secs_f64(
-                    self.backoff_secs * attempt as f64,
-                ))
-                .await;
+                tokio::time::sleep(Duration::from_secs_f64(self.backoff_secs * attempt as f64))
+                    .await;
             }
         }
         false
@@ -348,7 +363,10 @@ mod tests {
             payload: &serde_json::Value,
             _timeout: Duration,
         ) -> Result<(u16, String), String> {
-            self.calls.lock().unwrap().push((url.to_string(), payload.clone()));
+            self.calls
+                .lock()
+                .unwrap()
+                .push((url.to_string(), payload.clone()));
             let mut responses = self.responses.lock().unwrap();
             match responses.len() {
                 0 => Ok((200, r#"{"ok":true}"#.to_string())),
@@ -375,17 +393,27 @@ mod tests {
     #[test]
     fn test_format_messages() {
         let msg = format_change_message("商品A", "售罄", "充足", "2026-09-02T10:00:00+08:00", None);
-        assert_eq!(msg, "【变更】商品A\n售罄 → 充足\n时间：2026-09-02T10:00:00+08:00");
+        assert_eq!(
+            msg,
+            "【变更】商品A\n售罄 → 充足\n时间：2026-09-02T10:00:00+08:00"
+        );
 
         let url = "https://e.com/order/123";
         let msg = format_change_message("商品A", "售罄", "充足", "t", Some(url));
         assert!(msg.ends_with(url));
 
-        let msg = format_failure_message("商品A", 3, "导航失败：Timeout", "t", Some("https://e.com/page"));
+        let msg = format_failure_message(
+            "商品A",
+            3,
+            "导航失败：Timeout",
+            "t",
+            Some("https://e.com/page"),
+        );
         assert!(msg.contains("连续 3 次抓取失败"));
         assert!(msg.ends_with("https://e.com/page"));
 
-        let msg = format_new_post_message("HK 机房测评", "https://www.nodeseek.com/post-911200-1", "t");
+        let msg =
+            format_new_post_message("HK 机房测评", "https://www.nodeseek.com/post-911200-1", "t");
         assert!(msg.contains("HK 机房测评"));
         assert!(msg.contains("https://www.nodeseek.com/post-911200-1"));
     }
@@ -398,7 +426,10 @@ mod tests {
         let calls = api.calls();
         assert_eq!(calls.len(), 1);
         assert!(calls[0].0.ends_with("/bottok/sendMessage"));
-        assert_eq!(calls[0].1, serde_json::json!({"chat_id": "chat", "text": "hi"}));
+        assert_eq!(
+            calls[0].1,
+            serde_json::json!({"chat_id": "chat", "text": "hi"})
+        );
     }
 
     #[tokio::test]
@@ -453,8 +484,14 @@ mod tests {
 
     fn menu() -> Vec<BotCommand> {
         vec![
-            BotCommand { command: "add".into(), description: "新建监控".into() },
-            BotCommand { command: "help".into(), description: "显示命令说明".into() },
+            BotCommand {
+                command: "add".into(),
+                description: "新建监控".into(),
+            },
+            BotCommand {
+                command: "help".into(),
+                description: "显示命令说明".into(),
+            },
         ]
     }
 

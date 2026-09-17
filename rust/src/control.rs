@@ -17,14 +17,16 @@ use std::sync::Arc;
 
 use tokio::sync::Mutex;
 
-use crate::config::{is_http_url, load_config, load_raw, MonitoredElement, Page, WatchTarget};
-use crate::configedit::{add_element, add_watch, remove_element, remove_watch, write_config, EditError};
+use crate::config::{MonitoredElement, Page, WatchTarget, is_http_url, load_config, load_raw};
+use crate::configedit::{
+    EditError, add_element, add_watch, remove_element, remove_watch, write_config,
+};
 use crate::extract::normalize_text;
 use crate::fetch::{FetchResult, ListResult, PageResult};
 use crate::notify::{BotCommand, NotifierApi};
-use crate::scheduler::SchedulerApi;
 use crate::receive::Command;
-use crate::scheduler::{matches, KIND_ELEMENT, KIND_WATCH, MonitorRow};
+use crate::scheduler::SchedulerApi;
+use crate::scheduler::{KIND_ELEMENT, KIND_WATCH, MonitorRow, matches};
 
 const MAX_MESSAGE: usize = 4096;
 const TRIAL: &str = "试抓";
@@ -49,12 +51,30 @@ const DEL_CONFIRM: &str = "删除确认";
 /// 快捷菜单与 /help 的唯一真相。
 pub fn menu_commands() -> Vec<BotCommand> {
     vec![
-        BotCommand { command: "add".into(), description: "新建监控，按提示逐步填写（网页元素变更 / 论坛关键词）".into() },
-        BotCommand { command: "list".into(), description: "列出全部监控及当前状态".into() },
-        BotCommand { command: "del".into(), description: "按编号删除一个监控，需二次确认".into() },
-        BotCommand { command: "menu".into(), description: "重新同步本快捷菜单".into() },
-        BotCommand { command: "help".into(), description: "显示命令说明".into() },
-        BotCommand { command: "cancel".into(), description: "取消进行中的操作".into() },
+        BotCommand {
+            command: "add".into(),
+            description: "新建监控，按提示逐步填写（网页元素变更 / 论坛关键词）".into(),
+        },
+        BotCommand {
+            command: "list".into(),
+            description: "列出全部监控及当前状态".into(),
+        },
+        BotCommand {
+            command: "del".into(),
+            description: "按编号删除一个监控，需二次确认".into(),
+        },
+        BotCommand {
+            command: "menu".into(),
+            description: "重新同步本快捷菜单".into(),
+        },
+        BotCommand {
+            command: "help".into(),
+            description: "显示命令说明".into(),
+        },
+        BotCommand {
+            command: "cancel".into(),
+            description: "取消进行中的操作".into(),
+        },
     ]
 }
 
@@ -68,8 +88,7 @@ fn help_text() -> String {
     lines.join("\n")
 }
 
-const UNPARSABLE_REFUSAL: &str =
-    "配置文件当前不可解析，已拒绝写入。请先修好 config.toml 再重试。";
+const UNPARSABLE_REFUSAL: &str = "配置文件当前不可解析，已拒绝写入。请先修好 config.toml 再重试。";
 
 const PICK_KIND_PROMPT: &str =
     "要新建哪种监控？\n1 = 网页元素变更监控\n2 = 论坛关键词监控\n回复 1 或 2，或 /cancel 取消。";
@@ -123,8 +142,11 @@ pub fn clip(text: &str, limit: usize) -> String {
 
 /// 空格、逗号、中文逗号、顿号皆可作分隔符。
 fn split_keywords(text: &str) -> Vec<String> {
-    let normalized = text.replace('，', " ").replace(',', " ").replace('、', " ");
-    normalized.split_whitespace().map(|s| s.to_string()).collect()
+    let normalized = text.replace(['，', ',', '、'], " ");
+    normalized
+        .split_whitespace()
+        .map(|s| s.to_string())
+        .collect()
 }
 
 fn parse_index(text: &str, total: usize) -> Option<usize> {
@@ -140,7 +162,14 @@ fn format_rows(rows: &[MonitorRow]) -> Vec<String> {
     rows.iter()
         .enumerate()
         .map(|(i, row)| {
-            format!("#{} [{}] {} — {} — {}", i + 1, row.kind, row.identity, row.url, clip(&row.status, 60))
+            format!(
+                "#{} [{}] {} — {} — {}",
+                i + 1,
+                row.kind,
+                row.identity,
+                row.url,
+                clip(&row.status, 60)
+            )
         })
         .collect()
 }
@@ -178,11 +207,17 @@ struct StepOutcome {
 }
 
 fn replies_out(replies: Vec<String>) -> StepOutcome {
-    StepOutcome { replies, keep: true }
+    StepOutcome {
+        replies,
+        keep: true,
+    }
 }
 
 fn done_out(replies: Vec<String>) -> StepOutcome {
-    StepOutcome { replies, keep: false }
+    StepOutcome {
+        replies,
+        keep: false,
+    }
 }
 
 /// 把授权会话的命令翻译成配置改写与运行时协调。
@@ -371,7 +406,8 @@ impl Controller {
                     session.element_url = None;
                 } else if !is_http_url(text) {
                     return Ok(replies_out(vec![
-                        "这不像一个 http(s) 地址，请重新发送完整 URL，或直接回车/- 跳过。".to_string(),
+                        "这不像一个 http(s) 地址，请重新发送完整 URL，或直接回车/- 跳过。"
+                            .to_string(),
                     ]));
                 } else {
                     session.element_url = Some(text.to_string());
@@ -385,13 +421,16 @@ impl Controller {
                 session.link_selector = text.to_string();
                 session.step = WATCH_KEYWORDS;
                 Ok(replies_out(vec![
-                    "请发送关键词，多个用空格或逗号分隔（不区分大小写，命中任一即通知）。".to_string(),
+                    "请发送关键词，多个用空格或逗号分隔（不区分大小写，命中任一即通知）。"
+                        .to_string(),
                 ]))
             }
             WATCH_KEYWORDS => {
                 let keywords = split_keywords(text);
                 if keywords.is_empty() {
-                    return Ok(replies_out(vec!["至少需要一个关键词，请重新发送。".to_string()]));
+                    return Ok(replies_out(vec![
+                        "至少需要一个关键词，请重新发送。".to_string(),
+                    ]));
                 }
                 session.keywords = keywords;
                 session.step = WATCH_NAME;
@@ -415,7 +454,11 @@ impl Controller {
                         ]));
                     }
                 }
-                session.name = if text == "-" { None } else { Some(text.to_string()) };
+                session.name = if text == "-" {
+                    None
+                } else {
+                    Some(text.to_string())
+                };
                 if session.step == ELEMENT_NAME {
                     session.step = ELEMENT_JUMP_URL;
                     return Ok(replies_out(vec![
@@ -438,7 +481,9 @@ impl Controller {
                 }
                 Ok(done_out(vec!["已取消，未删除任何监控。".to_string()]))
             }
-            _ => Ok(done_out(vec!["没有进行中的操作。发送 /help 查看用法。".to_string()])),
+            _ => Ok(done_out(vec![
+                "没有进行中的操作。发送 /help 查看用法。".to_string(),
+            ])),
         }
     }
 
@@ -489,7 +534,10 @@ impl Controller {
         let element = MonitoredElement {
             merchant_name: TRIAL.to_string(),
             page_name: TRIAL.to_string(),
-            name: session.name.clone().unwrap_or_else(|| session.selector.clone()),
+            name: session
+                .name
+                .clone()
+                .unwrap_or_else(|| session.selector.clone()),
             selector: session.selector.clone(),
             selector_type: "auto".to_string(),
             nth: None,
@@ -528,7 +576,10 @@ impl Controller {
     }
 
     async fn trial_element(&self, session: &mut Session) -> Result<StepOutcome, EditError> {
-        let result = self.scheduler.trial_fetch_page(self.temp_page(session)).await;
+        let result = self
+            .scheduler
+            .trial_fetch_page(self.temp_page(session))
+            .await;
         match result {
             PageResult::LoadError { reason } => Ok(self.ask_anyway(
                 session,
@@ -541,17 +592,20 @@ impl Controller {
                         let note = format!("试抓成功，当前取到：{}", clip(value, 200));
                         self.save(session, note).await
                     }
-                    FetchResult::NoMatch { reason } | FetchResult::Error { reason } => Ok(self.ask_anyway(
-                        session,
-                        format!("试抓没取到值：{}。", clip(reason, 120)),
-                    )),
+                    FetchResult::NoMatch { reason } | FetchResult::Error { reason } => {
+                        Ok(self
+                            .ask_anyway(session, format!("试抓没取到值：{}。", clip(reason, 120))))
+                    }
                 }
             }
         }
     }
 
     async fn trial_watch(&self, session: &mut Session) -> Result<StepOutcome, EditError> {
-        let result = self.scheduler.trial_fetch_list(self.temp_watch(session)).await;
+        let result = self
+            .scheduler
+            .trial_fetch_list(self.temp_watch(session))
+            .await;
         match result {
             ListResult::LoadError { reason } => Ok(self.ask_anyway(
                 session,
@@ -568,7 +622,10 @@ impl Controller {
                     .iter()
                     .filter(|item| matches(&session.keywords, &item.title))
                     .count();
-                let note = format!("试抓成功：找到 {} 条链接，其中 {hits} 条命中关键词。", items.len());
+                let note = format!(
+                    "试抓成功：找到 {} 条链接，其中 {hits} 条命中关键词。",
+                    items.len()
+                );
                 if hits == 0 {
                     return Ok(self.ask_anyway(
                         session,
@@ -583,13 +640,19 @@ impl Controller {
     /// 试抓不理想时不擅自决定：让用户在「仍然保存」和「取消」之间选。
     fn ask_anyway(&self, session: &mut Session, reason: String) -> StepOutcome {
         session.step = CONFIRM_SAVE;
-        replies_out(vec![format!("{reason}\n回复 1 仍然保存，回复其他内容取消。")])
+        replies_out(vec![format!(
+            "{reason}\n回复 1 仍然保存，回复其他内容取消。"
+        )])
     }
 
     // ---- 落盘：写事务 + 立即协调运行时 ----
 
     async fn save(&self, session: &Session, note: String) -> Result<StepOutcome, EditError> {
-        let prefix = if note.is_empty() { String::new() } else { format!("{note}\n") };
+        let prefix = if note.is_empty() {
+            String::new()
+        } else {
+            format!("{note}\n")
+        };
         if !*self.writable.lock().await {
             return Ok(done_out(vec![format!("{prefix}{UNPARSABLE_REFUSAL}")]));
         }
@@ -618,7 +681,9 @@ impl Controller {
             Ok(c) => c,
             Err(e) => {
                 tracing::warn!("保存失败：{e}");
-                return Ok(done_out(vec![format!("{prefix}保存失败：{e}\nconfig.toml 未被改动。")]));
+                return Ok(done_out(vec![format!(
+                    "{prefix}保存失败：{e}\nconfig.toml 未被改动。"
+                )]));
             }
         };
         self.scheduler.reconcile(config).await;
@@ -646,7 +711,10 @@ impl Controller {
             }
         };
         self.scheduler.reconcile(config).await;
-        Ok(done_out(vec![format!("已删除 {}，即时生效。", target.identity)]))
+        Ok(done_out(vec![format!(
+            "已删除 {}，即时生效。",
+            target.identity
+        )]))
     }
 }
 
@@ -833,19 +901,28 @@ chat_id = "c"
 
         async fn trial_fetch_page(&self, page: Page) -> PageResult {
             self.trial_pages.lock().unwrap().push(page);
-            self.page_result.lock().unwrap().clone().expect("测试未设置 page_result")
+            self.page_result
+                .lock()
+                .unwrap()
+                .clone()
+                .expect("测试未设置 page_result")
         }
 
         async fn trial_fetch_list(&self, watch: WatchTarget) -> ListResult {
             self.trial_watches.lock().unwrap().push(watch);
-            self.list_result.lock().unwrap().clone().expect("测试未设置 list_result")
+            self.list_result
+                .lock()
+                .unwrap()
+                .clone()
+                .expect("测试未设置 list_result")
         }
     }
 
     // ---- 装配 ----
 
     fn tmp_config(tag: &str, content: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("hawkeye_ctrl_test_{}_{}", std::process::id(), tag));
+        let dir =
+            std::env::temp_dir().join(format!("hawkeye_ctrl_test_{}_{}", std::process::id(), tag));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("config.toml");
@@ -869,7 +946,12 @@ chat_id = "c"
             scheduler.clone() as Arc<dyn SchedulerApi>,
             notifier.clone() as Arc<dyn NotifierApi>,
         );
-        Fixture { controller, scheduler, notifier, path }
+        Fixture {
+            controller,
+            scheduler,
+            notifier,
+            path,
+        }
     }
 
     fn setup(tag: &str) -> Fixture {
@@ -891,14 +973,21 @@ chat_id = "c"
 
     fn page_ok(value: &str) -> PageResult {
         PageResult::Fetched {
-            results: vec![(trial_element(), FetchResult::Ok { value: value.into() })],
+            results: vec![(
+                trial_element(),
+                FetchResult::Ok {
+                    value: value.into(),
+                },
+            )],
         }
     }
 
     async fn send(controller: &Controller, texts: &[&str]) {
         for text in texts {
             controller
-                .handle(Command { text: text.to_string() })
+                .handle(Command {
+                    text: text.to_string(),
+                })
                 .await;
         }
     }
@@ -913,7 +1002,11 @@ chat_id = "c"
         let sent = f.notifier.sent();
         assert_eq!(sent.len(), 1);
         for c in menu_commands() {
-            assert!(sent[0].contains(&format!("/{} —— {}", c.command, c.description)), "缺少 /{}", c.command);
+            assert!(
+                sent[0].contains(&format!("/{} —— {}", c.command, c.description)),
+                "缺少 /{}",
+                c.command
+            );
         }
     }
 
@@ -930,7 +1023,10 @@ chat_id = "c"
     async fn test_plain_text_without_session_points_to_help() {
         let f = setup("h2");
         send(&f.controller, &["你好"]).await;
-        assert_eq!(f.notifier.sent(), vec!["没有进行中的操作。发送 /help 查看用法。"]);
+        assert_eq!(
+            f.notifier.sent(),
+            vec!["没有进行中的操作。发送 /help 查看用法。"]
+        );
     }
 
     #[tokio::test]
@@ -960,17 +1056,36 @@ chat_id = "c"
         let f = setup("a1");
         f.scheduler.set_page_result(page_ok("¥99"));
 
-        send(&f.controller, &["/add", "1", "https://yunyoo.cc/new", "#price", "-", "价格", "-"]).await;
+        send(
+            &f.controller,
+            &[
+                "/add",
+                "1",
+                "https://yunyoo.cc/new",
+                "#price",
+                "-",
+                "价格",
+                "-",
+            ],
+        )
+        .await;
 
         let sent = f.notifier.sent();
         assert!(sent.last().unwrap().contains("¥99"), "{sent:?}");
-        assert!(sent.last().unwrap().contains("已保存并即时生效"), "{sent:?}");
+        assert!(
+            sent.last().unwrap().contains("已保存并即时生效"),
+            "{sent:?}"
+        );
         assert_eq!(f.scheduler.reconciled.lock().unwrap().len(), 1);
 
         let cfg = load_config(&f.path).unwrap();
         let names: Vec<&str> = cfg.merchants.iter().map(|m| m.name.as_str()).collect();
         assert_eq!(names, vec!["yunyoo", "yunyoo.cc"]);
-        let identities: Vec<String> = cfg.pages().iter().flat_map(|p| p.elements.iter().map(|e| e.identity())).collect();
+        let identities: Vec<String> = cfg
+            .pages()
+            .iter()
+            .flat_map(|p| p.elements.iter().map(|e| e.identity()))
+            .collect();
         assert!(identities.contains(&"yunyoo.cc / https://yunyoo.cc/new / 价格".to_string()));
     }
 
@@ -980,12 +1095,20 @@ chat_id = "c"
         let f = setup("a2");
         f.scheduler.set_page_result(page_ok("¥1"));
 
-        send(&f.controller, &["/add", "1", "https://yunyoo.cc/cart", "#b", "-", "-", "-"]).await;
+        send(
+            &f.controller,
+            &["/add", "1", "https://yunyoo.cc/cart", "#b", "-", "-", "-"],
+        )
+        .await;
 
         let cfg = load_config(&f.path).unwrap();
         assert_eq!(cfg.merchants.len(), 1);
         assert_eq!(cfg.pages().len(), 1);
-        let identities: Vec<String> = cfg.pages()[0].elements.iter().map(|e| e.identity()).collect();
+        let identities: Vec<String> = cfg.pages()[0]
+            .elements
+            .iter()
+            .map(|e| e.identity())
+            .collect();
         assert_eq!(
             identities,
             vec![
@@ -1003,7 +1126,11 @@ chat_id = "c"
 
         send(&f.controller, &["https://yunyoo.cc/cart"]).await;
         // 步骤没被推进，补上合法 URL 后照常继续。
-        assert!(f.notifier.sent().last().unwrap().contains("选择器"), "{:?}", f.notifier.sent());
+        assert!(
+            f.notifier.sent().last().unwrap().contains("选择器"),
+            "{:?}",
+            f.notifier.sent()
+        );
     }
 
     #[tokio::test]
@@ -1012,11 +1139,32 @@ chat_id = "c"
         let f = setup("a4");
         f.scheduler.set_page_result(page_ok("¥5"));
 
-        send(&f.controller, &["/add", "1", "https://e.com/p", "//span[@id='p']", "-", "-", "-"]).await;
+        send(
+            &f.controller,
+            &[
+                "/add",
+                "1",
+                "https://e.com/p",
+                "//span[@id='p']",
+                "-",
+                "-",
+                "-",
+            ],
+        )
+        .await;
 
         let trial_pages = f.scheduler.trial_pages.lock().unwrap().clone();
-        assert_eq!(trial_pages.last().unwrap().elements[0].selector, "//span[@id='p']");
-        assert!(f.notifier.sent().last().unwrap().contains("已保存并即时生效"));
+        assert_eq!(
+            trial_pages.last().unwrap().elements[0].selector,
+            "//span[@id='p']"
+        );
+        assert!(
+            f.notifier
+                .sent()
+                .last()
+                .unwrap()
+                .contains("已保存并即时生效")
+        );
     }
 
     #[tokio::test]
@@ -1026,29 +1174,52 @@ chat_id = "c"
         f.scheduler.set_page_result(PageResult::Fetched {
             results: vec![(
                 trial_element(),
-                FetchResult::NoMatch { reason: "选择器匹配到元素，但其文本为空".into() },
+                FetchResult::NoMatch {
+                    reason: "选择器匹配到元素，但其文本为空".into(),
+                },
             )],
         });
 
-        send(&f.controller, &["/add", "1", "https://e.com/p", "#nope", "-", "-", "-"]).await;
+        send(
+            &f.controller,
+            &["/add", "1", "https://e.com/p", "#nope", "-", "-", "-"],
+        )
+        .await;
         let sent = f.notifier.sent();
         // 控制面转达抓取层给的原话，不另编一套说法。
-        assert!(sent.last().unwrap().contains("选择器匹配到元素，但其文本为空"), "{sent:?}");
+        assert!(
+            sent.last()
+                .unwrap()
+                .contains("选择器匹配到元素，但其文本为空"),
+            "{sent:?}"
+        );
         assert!(sent.last().unwrap().contains("仍然保存"));
         assert!(f.scheduler.reconciled.lock().unwrap().is_empty());
 
         send(&f.controller, &["1"]).await;
-        assert!(f.notifier.sent().last().unwrap().contains("已保存并即时生效"));
+        assert!(
+            f.notifier
+                .sent()
+                .last()
+                .unwrap()
+                .contains("已保存并即时生效")
+        );
         assert_eq!(load_config(&f.path).unwrap().element_count(), 2);
     }
 
     #[tokio::test]
     async fn test_trial_failure_cancel_leaves_file_untouched() {
         let f = setup("a6");
-        f.scheduler.set_page_result(PageResult::LoadError { reason: "导航超时".into() });
+        f.scheduler.set_page_result(PageResult::LoadError {
+            reason: "导航超时".into(),
+        });
         let before = std::fs::read(&f.path).unwrap();
 
-        send(&f.controller, &["/add", "1", "https://e.com/p", "#x", "-", "-", "-", "2"]).await;
+        send(
+            &f.controller,
+            &["/add", "1", "https://e.com/p", "#x", "-", "-", "-", "2"],
+        )
+        .await;
 
         let sent = f.notifier.sent();
         assert!(sent[sent.len() - 2].contains("导航超时"), "{sent:?}");
@@ -1063,7 +1234,19 @@ chat_id = "c"
         let f = setup("a7");
         f.scheduler.set_page_result(page_ok("¥99"));
 
-        send(&f.controller, &["/add", "1", "https://yunyoo.cc/new", "#price", "-", "价格", "https://yunyoo.cc/order/123"]).await;
+        send(
+            &f.controller,
+            &[
+                "/add",
+                "1",
+                "https://yunyoo.cc/new",
+                "#price",
+                "-",
+                "价格",
+                "https://yunyoo.cc/order/123",
+            ],
+        )
+        .await;
 
         let cfg = load_config(&f.path).unwrap();
         let el = cfg
@@ -1080,7 +1263,19 @@ chat_id = "c"
         let f = setup("a8");
         f.scheduler.set_page_result(page_ok("¥1"));
 
-        send(&f.controller, &["/add", "1", "https://yunyoo.cc/new", "#price", "-", "价格", "-"]).await;
+        send(
+            &f.controller,
+            &[
+                "/add",
+                "1",
+                "https://yunyoo.cc/new",
+                "#price",
+                "-",
+                "价格",
+                "-",
+            ],
+        )
+        .await;
 
         let cfg = load_config(&f.path).unwrap();
         let el = cfg
@@ -1099,16 +1294,37 @@ chat_id = "c"
         let f = setup("w1");
         f.scheduler.set_list_result(ListResult::Fetched {
             items: vec![
-                crate::extract::ListItem { post_id: "1".into(), title: "出售 HK 节点".into(), url: "https://ns.com/1".into() },
-                crate::extract::ListItem { post_id: "2".into(), title: "收 VPS".into(), url: "https://ns.com/2".into() },
-                crate::extract::ListItem { post_id: "3".into(), title: "hk 便宜机".into(), url: "https://ns.com/3".into() },
+                crate::extract::ListItem {
+                    post_id: "1".into(),
+                    title: "出售 HK 节点".into(),
+                    url: "https://ns.com/1".into(),
+                },
+                crate::extract::ListItem {
+                    post_id: "2".into(),
+                    title: "收 VPS".into(),
+                    url: "https://ns.com/2".into(),
+                },
+                crate::extract::ListItem {
+                    post_id: "3".into(),
+                    title: "hk 便宜机".into(),
+                    url: "https://ns.com/3".into(),
+                },
             ],
         });
 
-        send(&f.controller, &["/add", "2", "https://ns.com/", ".title a", "hk、香港", "-"]).await;
+        send(
+            &f.controller,
+            &["/add", "2", "https://ns.com/", ".title a", "hk、香港", "-"],
+        )
+        .await;
 
         let sent = f.notifier.sent();
-        assert!(sent.last().unwrap().contains("找到 3 条链接，其中 2 条命中关键词"), "{sent:?}");
+        assert!(
+            sent.last()
+                .unwrap()
+                .contains("找到 3 条链接，其中 2 条命中关键词"),
+            "{sent:?}"
+        );
         assert!(sent.last().unwrap().contains("已保存并即时生效"));
         assert_eq!(f.scheduler.reconciled.lock().unwrap().len(), 1);
 
@@ -1141,9 +1357,19 @@ chat_id = "c"
             }],
         });
 
-        send(&f.controller, &["/add", "2", "https://ns.com/", "a", "hk", "NS 交易区"]).await;
+        send(
+            &f.controller,
+            &["/add", "2", "https://ns.com/", "a", "hk", "NS 交易区"],
+        )
+        .await;
 
-        assert!(f.notifier.sent().last().unwrap().contains("已保存并即时生效"));
+        assert!(
+            f.notifier
+                .sent()
+                .last()
+                .unwrap()
+                .contains("已保存并即时生效")
+        );
         let trial_watches = f.scheduler.trial_watches.lock().unwrap().clone();
         assert_eq!(trial_watches.last().unwrap().name, "NS 交易区");
         let cfg = load_config(&f.path).unwrap();
@@ -1162,10 +1388,19 @@ chat_id = "c"
         });
         let before = std::fs::read(&f.path).unwrap();
 
-        send(&f.controller, &["/add", "2", "https://ns.com/", "a", "hk", "-"]).await;
+        send(
+            &f.controller,
+            &["/add", "2", "https://ns.com/", "a", "hk", "-"],
+        )
+        .await;
 
         let sent = f.notifier.sent();
-        assert!(sent.last().unwrap().contains("找到 1 条链接，其中 0 条命中关键词"), "{sent:?}");
+        assert!(
+            sent.last()
+                .unwrap()
+                .contains("找到 1 条链接，其中 0 条命中关键词"),
+            "{sent:?}"
+        );
         assert!(sent.last().unwrap().contains("仍然保存"));
         assert_eq!(std::fs::read(&f.path).unwrap(), before);
     }
@@ -1176,7 +1411,10 @@ chat_id = "c"
     async fn test_list_empty_hints_add() {
         let f = setup_with("l1", ONLY_TELEGRAM);
         send(&f.controller, &["/list"]).await;
-        assert_eq!(f.notifier.sent(), vec!["当前没有任何监控。发送 /add 添加第一个。"]);
+        assert_eq!(
+            f.notifier.sent(),
+            vec!["当前没有任何监控。发送 /add 添加第一个。"]
+        );
     }
 
     #[tokio::test]
@@ -1184,9 +1422,18 @@ chat_id = "c"
         let f = setup_with("l2", &format!("{BASE}{WATCH_BLOCK}"));
         send(&f.controller, &["/list"]).await;
         let sent = f.notifier.sent();
-        assert!(sent.last().unwrap().contains("#1 [元素] yunyoo / 购物车 / 商品A"), "{sent:?}");
+        assert!(
+            sent.last()
+                .unwrap()
+                .contains("#1 [元素] yunyoo / 购物车 / 商品A"),
+            "{sent:?}"
+        );
         assert!(sent.last().unwrap().contains("https://yunyoo.cc/cart"));
-        assert!(sent.last().unwrap().contains("#2 [论坛] watch / https://ns.com/"));
+        assert!(
+            sent.last()
+                .unwrap()
+                .contains("#2 [论坛] watch / https://ns.com/")
+        );
         assert!(sent.last().unwrap().contains("已见 3 帖"));
     }
 
@@ -1217,7 +1464,10 @@ chat_id = "c"
         send(&f.controller, &["/del", "1", "1"]).await;
 
         let sent = f.notifier.sent();
-        assert!(sent[0].contains("#1 [元素] yunyoo / 购物车 / 商品A"), "{sent:?}");
+        assert!(
+            sent[0].contains("#1 [元素] yunyoo / 购物车 / 商品A"),
+            "{sent:?}"
+        );
         assert!(sent[1].contains("将要删除 #1"));
         assert_eq!(
             sent.last().unwrap(),
@@ -1259,7 +1509,10 @@ chat_id = "c"
         let before = std::fs::read(&f.path).unwrap();
         send(&f.controller, &["/del", "1", "算了"]).await;
 
-        assert_eq!(f.notifier.sent().last().unwrap(), "已取消，未删除任何监控。");
+        assert_eq!(
+            f.notifier.sent().last().unwrap(),
+            "已取消，未删除任何监控。"
+        );
         assert_eq!(std::fs::read(&f.path).unwrap(), before);
         assert!(f.scheduler.reconciled.lock().unwrap().is_empty());
     }
@@ -1274,7 +1527,13 @@ chat_id = "c"
         send(&f.controller, &["/list"]).await;
 
         assert_eq!(f.scheduler.reconciled.lock().unwrap().len(), 1);
-        assert!(f.notifier.sent().last().unwrap().contains("watch / https://ns.com/"));
+        assert!(
+            f.notifier
+                .sent()
+                .last()
+                .unwrap()
+                .contains("watch / https://ns.com/")
+        );
     }
 
     #[tokio::test]
@@ -1297,9 +1556,17 @@ chat_id = "c"
         std::fs::write(&f.path, "坏文件 {{{").unwrap();
         let broken = std::fs::read(&f.path).unwrap();
 
-        send(&f.controller, &["/add", "1", "https://e.com/p", "#x", "-", "-", "-"]).await;
+        send(
+            &f.controller,
+            &["/add", "1", "https://e.com/p", "#x", "-", "-", "-"],
+        )
+        .await;
 
-        assert!(f.notifier.sent().last().unwrap().contains("已拒绝写入"), "{:?}", f.notifier.sent());
+        assert!(
+            f.notifier.sent().last().unwrap().contains("已拒绝写入"),
+            "{:?}",
+            f.notifier.sent()
+        );
         assert_eq!(std::fs::read(&f.path).unwrap(), broken);
         assert!(f.scheduler.reconciled.lock().unwrap().is_empty());
     }

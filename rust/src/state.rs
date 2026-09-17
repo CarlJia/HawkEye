@@ -50,10 +50,16 @@ pub fn load_state(path: &Path) -> State {
 
 fn backup_corrupt(p: &Path, e: &str) {
     let ts = Local::now().format("%Y%m%d%H%M%S");
-    let backup = p.with_file_name(format!("{}.corrupt.{ts}", p.file_name().unwrap_or_default().to_string_lossy()));
+    let backup = p.with_file_name(format!(
+        "{}.corrupt.{ts}",
+        p.file_name().unwrap_or_default().to_string_lossy()
+    ));
     let backup: PathBuf = backup;
     match std::fs::rename(p, &backup) {
-        Ok(()) => tracing::error!("状态文件损坏（{e}），已备份到 {} 并重置为空", backup.display()),
+        Ok(()) => tracing::error!(
+            "状态文件损坏（{e}），已备份到 {} 并重置为空",
+            backup.display()
+        ),
         Err(be) => tracing::error!("状态文件损坏（{e}），且备份失败：{be}"),
     }
 }
@@ -61,7 +67,10 @@ fn backup_corrupt(p: &Path, e: &str) {
 /// 原子写入：先写临时文件再原子替换。
 pub fn save_state(path: &Path, state: &State) {
     let payload = serde_json::to_string_pretty(state).unwrap_or_default();
-    let tmp = path.with_file_name(format!("{}.tmp", path.file_name().unwrap_or_default().to_string_lossy()));
+    let tmp = path.with_file_name(format!(
+        "{}.tmp",
+        path.file_name().unwrap_or_default().to_string_lossy()
+    ));
     if let Err(e) = std::fs::write(&tmp, payload) {
         tracing::error!("写状态临时文件失败：{e}");
         return;
@@ -80,11 +89,17 @@ mod tests {
         let mut state = State::new();
         state.insert(
             "m / p / e".to_string(),
-            Entry::State { value: "有货".into(), updated_at: "t".into() },
+            Entry::State {
+                value: "有货".into(),
+                updated_at: "t".into(),
+            },
         );
         state.insert(
             "watch / w".to_string(),
-            Entry::SeenSet { seen_ids: vec!["a".into()], updated_at: "t".into() },
+            Entry::SeenSet {
+                seen_ids: vec!["a".into()],
+                updated_at: "t".into(),
+            },
         );
         let tmp = std::env::temp_dir().join("hawkeye_state_test.json");
         save_state(&tmp, &state);
@@ -103,13 +118,16 @@ mod tests {
         assert!(state.is_empty());
         // 备份文件已生成。
         let mut found = false;
-        if let Some(dir) = tmp.parent() {
-            if let Ok(entries) = std::fs::read_dir(dir) {
-                for e in entries.flatten() {
-                    if e.file_name().to_string_lossy().starts_with("hawkeye_state_corrupt_test.json.corrupt.") {
-                        let _ = std::fs::remove_file(e.path());
-                        found = true;
-                    }
+        if let Some(dir) = tmp.parent()
+            && let Ok(entries) = std::fs::read_dir(dir)
+        {
+            for e in entries.flatten() {
+                if e.file_name()
+                    .to_string_lossy()
+                    .starts_with("hawkeye_state_corrupt_test.json.corrupt.")
+                {
+                    let _ = std::fs::remove_file(e.path());
+                    found = true;
                 }
             }
         }
@@ -121,17 +139,31 @@ mod tests {
     fn test_atomic_no_tmp_left() {
         let tmp = std::env::temp_dir().join("hawkeye_state_tmp_test.json");
         let mut state = State::new();
-        state.insert("k".to_string(), Entry::State { value: "v".into(), updated_at: "t".into() });
+        state.insert(
+            "k".to_string(),
+            Entry::State {
+                value: "v".into(),
+                updated_at: "t".into(),
+            },
+        );
         save_state(&tmp, &state);
-        assert!(!tmp.with_file_name("hawkeye_state_tmp_test.json.tmp").exists());
+        assert!(
+            !tmp.with_file_name("hawkeye_state_tmp_test.json.tmp")
+                .exists()
+        );
         let _ = std::fs::remove_file(&tmp);
     }
 
     #[test]
     fn test_wrong_shape_treated_as_corrupt() {
         // 根节点不是对象 / 条目字段类型错误都按损坏处理。
-        for content in ["[1,2]", "\"str\"", "{\"k\": {\"value\": 1, \"updated_at\": \"t\"}}"] {
-            let tmp = std::env::temp_dir().join(format!("hawkeye_state_shape_{}.json", content.len()));
+        for content in [
+            "[1,2]",
+            "\"str\"",
+            "{\"k\": {\"value\": 1, \"updated_at\": \"t\"}}",
+        ] {
+            let tmp =
+                std::env::temp_dir().join(format!("hawkeye_state_shape_{}.json", content.len()));
             std::fs::write(&tmp, content).unwrap();
             let state = load_state(&tmp);
             assert!(state.is_empty(), "应按损坏处理：{content}");
@@ -156,14 +188,20 @@ mod tests {
         let mut state = State::new();
         state.insert(
             "watch / w".to_string(),
-            Entry::SeenSet { seen_ids: vec!["a".into(), "b".into()], updated_at: "t".into() },
+            Entry::SeenSet {
+                seen_ids: vec!["a".into(), "b".into()],
+                updated_at: "t".into(),
+            },
         );
         let tmp = std::env::temp_dir().join("hawkeye_state_seen_test.json");
         save_state(&tmp, &state);
         let loaded = load_state(&tmp);
         assert_eq!(
             loaded.get("watch / w"),
-            Some(&Entry::SeenSet { seen_ids: vec!["a".into(), "b".into()], updated_at: "t".into() })
+            Some(&Entry::SeenSet {
+                seen_ids: vec!["a".into(), "b".into()],
+                updated_at: "t".into()
+            })
         );
         let _ = std::fs::remove_file(&tmp);
     }
@@ -173,14 +211,20 @@ mod tests {
         let mut state = State::new();
         state.insert(
             "watch / w".to_string(),
-            Entry::SeenSet { seen_ids: vec![], updated_at: "t".into() },
+            Entry::SeenSet {
+                seen_ids: vec![],
+                updated_at: "t".into(),
+            },
         );
         let tmp = std::env::temp_dir().join("hawkeye_state_seen_empty_test.json");
         save_state(&tmp, &state);
         let loaded = load_state(&tmp);
         assert_eq!(
             loaded.get("watch / w"),
-            Some(&Entry::SeenSet { seen_ids: vec![], updated_at: "t".into() })
+            Some(&Entry::SeenSet {
+                seen_ids: vec![],
+                updated_at: "t".into()
+            })
         );
         let _ = std::fs::remove_file(&tmp);
     }
@@ -188,17 +232,29 @@ mod tests {
     #[test]
     fn test_mixed_shapes_preserved() {
         let mut state = State::new();
-        state.insert("e".to_string(), Entry::State { value: "v".into(), updated_at: "t".into() });
+        state.insert(
+            "e".to_string(),
+            Entry::State {
+                value: "v".into(),
+                updated_at: "t".into(),
+            },
+        );
         state.insert(
             "watch / w".to_string(),
-            Entry::SeenSet { seen_ids: vec!["x".into()], updated_at: "t".into() },
+            Entry::SeenSet {
+                seen_ids: vec!["x".into()],
+                updated_at: "t".into(),
+            },
         );
         let tmp = std::env::temp_dir().join("hawkeye_state_mixed_test.json");
         save_state(&tmp, &state);
         let loaded = load_state(&tmp);
         assert_eq!(loaded.len(), 2);
         assert!(matches!(loaded.get("e"), Some(Entry::State { .. })));
-        assert!(matches!(loaded.get("watch / w"), Some(Entry::SeenSet { .. })));
+        assert!(matches!(
+            loaded.get("watch / w"),
+            Some(Entry::SeenSet { .. })
+        ));
         let _ = std::fs::remove_file(&tmp);
     }
 

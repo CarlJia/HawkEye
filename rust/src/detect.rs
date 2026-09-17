@@ -42,7 +42,10 @@ pub enum DetectNewResult {
 ///
 /// previous_seen 为 None → 首次运行，返回 SeenBaseline（当前全部 ID 去重、保序），
 /// 供上层静默记入、不推送；否则返回 NewItems，只含不在已见集合中的 ID。
-pub fn detect_new(previous_seen: Option<&HashSet<String>>, current_ids: &[String]) -> DetectNewResult {
+pub fn detect_new(
+    previous_seen: Option<&HashSet<String>>,
+    current_ids: &[String],
+) -> DetectNewResult {
     // 去重且保序。
     let mut deduped: Vec<String> = Vec::new();
     let mut seen_order: HashMap<&str, ()> = HashMap::new();
@@ -70,7 +73,12 @@ pub const SEEN_IDS_MAX: usize = 1000;
 /// 集合按「最久未见 → 最近见过」排序，超限时从队首淘汰。本轮仍出现在列表页上的
 /// ID 会被刷新到队尾：置顶帖长期挂在页面上，若纯按插入顺序淘汰，它迟早被挤出集合
 /// 并在下轮被当成新帖再推一次。
-pub fn merge_seen(prior: &[String], current_ids: &[String], confirmed: &[String], limit: usize) -> Vec<String> {
+pub fn merge_seen(
+    prior: &[String],
+    current_ids: &[String],
+    confirmed: &[String],
+    limit: usize,
+) -> Vec<String> {
     let mut order: Vec<String> = Vec::new();
     let mut index: HashMap<String, usize> = HashMap::new();
     let push = |v: String, order: &mut Vec<String>, index: &mut HashMap<String, usize>| {
@@ -118,7 +126,10 @@ mod tests {
         );
         assert_eq!(
             detect(Some("a"), "b"),
-            DetectResult::Changed { old: "a".into(), new: "b".into() }
+            DetectResult::Changed {
+                old: "a".into(),
+                new: "b".into()
+            }
         );
     }
 
@@ -159,7 +170,10 @@ mod tests {
     #[test]
     fn test_detect_new_partial_preserves_order() {
         let seen: HashSet<String> = ["a".to_string()].into_iter().collect();
-        match detect_new(Some(&seen), &["c".to_string(), "a".to_string(), "b".to_string()]) {
+        match detect_new(
+            Some(&seen),
+            &["c".to_string(), "a".to_string(), "b".to_string()],
+        ) {
             DetectNewResult::NewItems { new_ids } => {
                 assert_eq!(new_ids, vec!["c".to_string(), "b".to_string()]);
             }
@@ -170,7 +184,10 @@ mod tests {
     #[test]
     fn test_detect_new_dedups_current() {
         let seen: HashSet<String> = ["x".to_string()].into_iter().collect();
-        match detect_new(Some(&seen), &["a".to_string(), "a".to_string(), "a".to_string()]) {
+        match detect_new(
+            Some(&seen),
+            &["a".to_string(), "a".to_string(), "a".to_string()],
+        ) {
             DetectNewResult::NewItems { new_ids } => assert_eq!(new_ids, vec!["a".to_string()]),
             other => panic!("unexpected: {other:?}"),
         }
@@ -190,13 +207,24 @@ mod tests {
     fn test_merge_seen_under_limit_appends_confirmed() {
         // 未超上限时行为与「旧集合 + 本轮确认」拼接一致
         let merged = merge_seen(&["1".into(), "2".into()], &["3".into()], &["3".into()], 10);
-        assert_eq!(merged, vec!["1".to_string(), "2".to_string(), "3".to_string()]);
+        assert_eq!(
+            merged,
+            vec!["1".to_string(), "2".to_string(), "3".to_string()]
+        );
     }
 
     #[test]
     fn test_merge_seen_trims_oldest_beyond_limit() {
-        let merged = merge_seen(&["1".into(), "2".into(), "3".into()], &["4".into()], &["4".into()], 3);
-        assert_eq!(merged, vec!["2".to_string(), "3".to_string(), "4".to_string()]);
+        let merged = merge_seen(
+            &["1".into(), "2".into(), "3".into()],
+            &["4".into()],
+            &["4".into()],
+            3,
+        );
+        assert_eq!(
+            merged,
+            vec!["2".to_string(), "3".to_string(), "4".to_string()]
+        );
     }
 
     #[test]
@@ -209,7 +237,15 @@ mod tests {
             &["4".into()],
             4,
         );
-        assert_eq!(merged, vec!["2".to_string(), "3".to_string(), "4".to_string(), "pin".to_string()]);
+        assert_eq!(
+            merged,
+            vec![
+                "2".to_string(),
+                "3".to_string(),
+                "4".to_string(),
+                "pin".to_string()
+            ]
+        );
     }
 
     #[test]
@@ -221,7 +257,12 @@ mod tests {
 
     #[test]
     fn test_merge_seen_dedups() {
-        let merged = merge_seen(&["1".into(), "2".into()], &["1".into(), "2".into()], &["1".into()], 10);
+        let merged = merge_seen(
+            &["1".into(), "2".into()],
+            &["1".into(), "2".into()],
+            &["1".into()],
+            10,
+        );
         assert_eq!(merged, vec!["1".to_string(), "2".to_string()]);
     }
 

@@ -135,7 +135,10 @@ pub struct MonitoredElement {
 impl MonitoredElement {
     /// 状态文件中的稳定标识：商家 / 页面 / 元素。
     pub fn identity(&self) -> String {
-        format!("{} / {} / {}", self.merchant_name, self.page_name, self.name)
+        format!(
+            "{} / {} / {}",
+            self.merchant_name, self.page_name, self.name
+        )
     }
 
     /// 把 auto 归一化为具体的 css / xpath。
@@ -277,10 +280,9 @@ fn opt_pos_int(d: &toml::Table, key: &str, default: i64, ctx: &str) -> Result<i6
     match d.get(key) {
         None => Ok(default),
         Some(toml::Value::Integer(v)) if *v > 0 => Ok(*v),
-        Some(toml::Value::Integer(v)) => Err(err(
-            ctx,
-            format!("字段 “{key}” 必须为正整数，当前为 {v}"),
-        )),
+        Some(toml::Value::Integer(v)) => {
+            Err(err(ctx, format!("字段 “{key}” 必须为正整数，当前为 {v}")))
+        }
         Some(_) => Err(err(ctx, format!("字段 “{key}” 必须为整数"))),
     }
 }
@@ -289,10 +291,9 @@ fn opt_nth(d: &toml::Table, ctx: &str) -> Result<Option<i64>, ConfigError> {
     match d.get("nth") {
         None => Ok(None),
         Some(toml::Value::Integer(v)) if *v >= 0 => Ok(Some(*v)),
-        Some(toml::Value::Integer(v)) => Err(err(
-            ctx,
-            format!("字段 “nth” 必须为非负整数，当前为 {v}"),
-        )),
+        Some(toml::Value::Integer(v)) => {
+            Err(err(ctx, format!("字段 “nth” 必须为非负整数，当前为 {v}")))
+        }
         Some(_) => Err(err(ctx, "字段 “nth” 必须为非负整数")),
     }
 }
@@ -353,7 +354,8 @@ fn parse_fingerprint(
         return Ok(base.clone());
     };
 
-    let user_agent = non_empty(opt_str(d, "user_agent", "", ctx)?).or_else(|| base.user_agent.clone());
+    let user_agent =
+        non_empty(opt_str(d, "user_agent", "", ctx)?).or_else(|| base.user_agent.clone());
     let locale = non_empty(opt_str(d, "locale", "", ctx)?).or_else(|| base.locale.clone());
 
     let tz_raw = opt_str(d, "timezone_id", "", ctx)?;
@@ -460,10 +462,7 @@ fn parse_proxy_string(url: &str) -> ProxyConfig {
                 let pw = p.password();
                 match (u.is_empty(), pw) {
                     (true, None) => None,
-                    _ => Some((
-                        percent_decode(u),
-                        pw.map(|s| percent_decode(s)),
-                    )),
+                    _ => Some((percent_decode(u), pw.map(percent_decode))),
                 }
             },
         )
@@ -617,22 +616,19 @@ fn parse_page(
     let page_defaults = override_defaults(p, defaults, ctx)?;
 
     let Some(elements_raw) = p.get("elements").and_then(|v| v.as_array()) else {
-        return Err(err(
-            ctx,
-            "至少需要配置一个 [[merchants.pages.elements]]",
-        ));
+        return Err(err(ctx, "至少需要配置一个 [[merchants.pages.elements]]"));
     };
     if elements_raw.is_empty() {
-        return Err(err(
-            ctx,
-            "至少需要配置一个 [[merchants.pages.elements]]",
-        ));
+        return Err(err(ctx, "至少需要配置一个 [[merchants.pages.elements]]"));
     }
 
     let mut elements = Vec::new();
     for (i, e) in elements_raw.iter().enumerate() {
         let Some(e_table) = e.as_table() else {
-            return Err(err(ctx, format!("第 {} 个 element 格式错误，应为表（table）", i + 1)));
+            return Err(err(
+                ctx,
+                format!("第 {} 个 element 格式错误，应为表（table）", i + 1),
+            ));
         };
         let element = parse_element(
             e_table,
@@ -692,7 +688,10 @@ fn parse_merchant(
     let mut pages = Vec::new();
     for (i, p) in pages_raw.iter().enumerate() {
         let Some(p_table) = p.as_table() else {
-            return Err(err(ctx, format!("第 {} 个 page 格式错误，应为表（table）", i + 1)));
+            return Err(err(
+                ctx,
+                format!("第 {} 个 page 格式错误，应为表（table）", i + 1),
+            ));
         };
         let page = parse_page(
             p_table,
@@ -735,7 +734,7 @@ fn parse_keywords(w: &toml::Table, ctx: &str) -> Result<Vec<String>, ConfigError
                 return Err(err(
                     ctx,
                     format!("字段 “keywords” 第 {} 项必须为非空字符串", i + 1),
-                ))
+                ));
             }
         }
     }
@@ -870,8 +869,9 @@ fn parse_watches(
 
 /// 读取 TOML 文件为未解析的 raw table。只负责「读文件 + 语法解析」。
 pub fn load_raw(path: &Path) -> Result<toml::Table, ConfigError> {
-    let text = std::fs::read_to_string(path)
-        .map_err(|e| ConfigError::new(format!("配置文件不存在或不可读：{}（{e}）", path.display())))?;
+    let text = std::fs::read_to_string(path).map_err(|e| {
+        ConfigError::new(format!("配置文件不存在或不可读：{}（{e}）", path.display()))
+    })?;
     toml::from_str(&text).map_err(|e| ConfigError::new(format!("配置文件 TOML 解析失败：{e}")))
 }
 
@@ -879,7 +879,12 @@ pub fn load_raw(path: &Path) -> Result<toml::Table, ConfigError> {
 ///
 /// 「零监控」是允许的：既无 [[merchants]] 也无 [[watches]] 时返回空集合的合法 Config。
 pub fn parse_config(raw: &toml::Table) -> Result<Config, ConfigError> {
-    let g_max = opt_pos_int(raw, "max_concurrent_fetches", DEFAULT_MAX_CONCURRENT, "全局配置")?;
+    let g_max = opt_pos_int(
+        raw,
+        "max_concurrent_fetches",
+        DEFAULT_MAX_CONCURRENT,
+        "全局配置",
+    )?;
     let g_state = opt_str(raw, "state_path", DEFAULT_STATE_PATH, "全局配置")?;
     let base = override_defaults(
         raw,

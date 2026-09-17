@@ -112,11 +112,16 @@ async fn run_daemon(config_path: &str) -> Result<(), DaemonError> {
     // 自检放在启动浏览器之前：发不出通知的进程没有必要先拉起 Chromium。
     notifier.verify().await.map_err(DaemonError::Telegram)?;
     // 顺手把快捷菜单建好/对齐；同步失败只告警，不影响监控本体。
-    let menu_reply = notifier.sync_commands(&hawkeye::control::menu_commands()).await;
+    let menu_reply = notifier
+        .sync_commands(&hawkeye::control::menu_commands())
+        .await;
     tracing::info!("{menu_reply}");
 
     let browser = Arc::new(hawkeye::fetch::BrowserManager::new(&config));
-    browser.start().await.map_err(|e| DaemonError::Other(anyhow::anyhow!(e)))?;
+    browser
+        .start()
+        .await
+        .map_err(|e| DaemonError::Other(anyhow::anyhow!(e)))?;
 
     // 两条循环共享同一个停止事件：信号处理只需置一次，二者一起收敛。
     // trait 对象的句柄转换：Arc<BrowserManager> → Arc<dyn FetchBackend> 等。
@@ -137,7 +142,7 @@ async fn run_daemon(config_path: &str) -> Result<(), DaemonError> {
     // 信号处理：SIGTERM / SIGINT → 优雅停止。
     let scheduler_for_signal = Arc::clone(&scheduler);
     tokio::spawn(async move {
-        use tokio::signal::unix::{signal, SignalKind};
+        use tokio::signal::unix::{SignalKind, signal};
         let mut sigterm = signal(SignalKind::terminate()).expect("注册 SIGTERM 处理失败");
         let mut sigint = signal(SignalKind::interrupt()).expect("注册 SIGINT 处理失败");
         tokio::select! {
@@ -170,7 +175,9 @@ async fn run_daemon(config_path: &str) -> Result<(), DaemonError> {
     }
     match recv_res {
         Ok(Ok(())) => {}
-        Ok(Err(hawkeye::receive::ReceiveError::Http(e))) => tracing::error!("接收循环异常退出：{e}"),
+        Ok(Err(hawkeye::receive::ReceiveError::Http(e))) => {
+            tracing::error!("接收循环异常退出：{e}")
+        }
         Ok(Err(hawkeye::receive::ReceiveError::Fatal(e))) => {
             browser.close().await;
             return Err(DaemonError::Telegram(e));
@@ -227,9 +234,18 @@ fn main() {
             }
         },
         Some(Command::Init { no_verify }) => run_init(&args.config, no_verify),
-        Some(Command::Deploy { host, port, user, overwrite_config }) => {
-            rt.block_on(run_deploy_cmd(&args.config, host, port, user, overwrite_config))
-        }
+        Some(Command::Deploy {
+            host,
+            port,
+            user,
+            overwrite_config,
+        }) => rt.block_on(run_deploy_cmd(
+            &args.config,
+            host,
+            port,
+            user,
+            overwrite_config,
+        )),
         Some(Command::Package { root }) => run_package(&root),
     };
     std::process::exit(code);
@@ -299,12 +315,15 @@ async fn run_deploy_cmd(
         user,
         overwrite_config,
     };
+    let paths = hawkeye::deploy::DeployPaths {
+        config_path: &config_path,
+        connection_file: &connection_file,
+        dist_dir: &dist_dir,
+        packaging_root: &packaging_root,
+    };
     hawkeye::deploy::run_deploy(
         &deploy_args,
-        &config_path,
-        &connection_file,
-        &dist_dir,
-        &packaging_root,
+        &paths,
         None,
         &console,
         Box::new(make_default_ops),
@@ -347,14 +366,20 @@ mod tests {
         // RUST_LOG 支持按 target 过滤（如静音 chromiumoxide 的 WS Invalid message）。
         let spec = "info,chromiumoxide::handler=error";
         assert_eq!(resolve_filter_spec(&args(false, None), Some(spec)), spec);
-        assert_eq!(resolve_filter_spec(&args(true, Some("warn")), Some(spec)), spec);
+        assert_eq!(
+            resolve_filter_spec(&args(true, Some("warn")), Some(spec)),
+            spec
+        );
     }
 
     #[test]
     fn test_default_spec_follows_cli_level() {
         assert_eq!(resolve_filter_spec(&args(false, None), None), "INFO");
         assert_eq!(resolve_filter_spec(&args(true, None), None), "DEBUG");
-        assert_eq!(resolve_filter_spec(&args(false, Some("warn")), None), "WARN");
+        assert_eq!(
+            resolve_filter_spec(&args(false, Some("warn")), None),
+            "WARN"
+        );
     }
 
     #[test]
