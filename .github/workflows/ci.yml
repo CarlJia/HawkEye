@@ -1,0 +1,71 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+# 新推送取消同一分支上未跑完的旧运行，省得排队等一个已知过时的结果。
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  lint:
+    name: fmt + clippy
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: rust
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
+      - run: cargo fmt --check
+      # -D warnings：clippy 的 correctness 组本来就是 deny，这里把 style 组也
+      # 一起升成错误，保证警告不会随时间累积。
+      - run: cargo clippy --all-targets --locked -- -D warnings
+
+  test:
+    name: test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        # 守护进程只跑 Linux / macOS，而开发机是 macOS——两边都测，
+        # macOS 才能挡住平台相关的回归（路径、权限、CF 抓取）。
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        working-directory: rust
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
+      # --locked：Cargo.lock 是提交进仓库的，依赖漂移要在 CI 里被抓到。
+      # 真实浏览器冒烟（#[ignore]）不在 CI 跑：需要本机 Chromium 且必须
+      # --test-threads=1，见 README「开发」一节。
+      - run: cargo test --locked
+
+  install-sh:
+    name: install.sh 冒烟
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: shellcheck
+        run: |
+          command -v shellcheck >/dev/null 2>&1 ||
+            { sudo apt-get update -qq && sudo apt-get install -y -qq shellcheck; }
+          shellcheck install.sh tests/install_smoke.sh
+      # 冒烟全程用桩替换 id/systemctl/apt-get/curl，并把 ROOT、单元与所有被探测的
+      # 绝对浏览器路径重定向到临时目录，所以不需要 root、不联网、不碰 runner 自身。
+      - run: bash tests/install_smoke.sh

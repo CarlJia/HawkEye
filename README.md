@@ -57,6 +57,37 @@ hawkeye deploy                            # 收集 VPS 信息，打包上传，�
 `init` 与 `deploy` 均为内建子命令，无可选依赖。监控守护进程本身需要本机可用的
 Chromium（macOS / Linux）。
 
+### 在服务器上一条命令装（可选）
+
+不想从本机 `deploy`、或手上只有服务器的 shell（比如网页控制台）时，用项目根的
+`install.sh` 直接在 VPS 上装：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/CarlJia/HawkEye/main/install.sh -o install.sh
+chmod +x install.sh
+sudo ./install.sh
+```
+
+（Rust 版还没并进 `main` 时，把 URL 里的 `main` 换成 `feature/rust`。）
+
+有终端时给菜单（安装 / 升级、卸载、状态、日志）；`curl … | sudo sh` 没有终端可读
+答案，直接按默认安装。二进制来源按顺序尝试：
+
+1. **脚本旁边有 `bin/hawkeye`**（`hawkeye deploy` 上传解压后的形态）→ 直接用，不联网；
+2. 否则取 **GitHub 发行版**（`hawkeye-<arch>-unknown-linux-musl`，下载后核对 sha256）；
+3. 两者都没有就**在服务器上编译源码**：缺 Rust 时自动装 rustup，`git clone` 后
+   `cargo build --release`（首次数分钟；内存 <1.5GB 会提示可能 OOM）。
+
+结果与 `hawkeye deploy` 一致：二进制 `/opt/hawkeye/hawkeye`、单元
+`hawkeye.service`、配置 `/opt/hawkeye/config.toml`（600）。`config.toml` 仍是模板时
+不启动服务，填好凭据后 `sudo systemctl start hawkeye`。
+
+```bash
+sudo ./install.sh --uninstall     # 卸载，保留配置与 state.json
+sudo ./install.sh --purge         # 卸载并删除配置与 state.json
+sudo ./install.sh --ref <分支>     # 源码构建指定分支/标签（默认 main）
+```
+
 ### `hawkeye init` 详解
 
 `init` 在交互式向导里问两个问题后直接写出文件，不会起浏览器或发网络请求（除非你选自检）：
@@ -378,9 +409,17 @@ hawkeye -c config.toml --log-level WARNING # 只保留告警及以上，压低�
 推荐用 `hawkeye deploy`（见上文详解）完成收集 VPS 信息、打包、上传与远端安装。
 远端 `install.sh` 幂等，可重复运行以升级（保留服务器上已有的 `config.toml` 与
 `state.json`）；配置三态处理与 `--overwrite-config` 语义同上文。
-VPS 上不需要 Python / Playwright 环境，只需要：systemd、一个 Chromium
-（`install.sh` 探测 `chromium` / `chromium-browser` / `google-chrome`，缺失时尝试
-`apt-get install`，装不上只告警不阻断）、`unzip` 或 `python3`（任一即可，用于解压）。
+`install.sh` **只有一份、就在项目根**：包内被 `deploy` 调用的就是它，也是「在服务器上
+一条命令装」的入口（见上文「在服务器上一条命令装」）。打包时按文件拷贝，不再内嵌副本，
+两份安装脚本各自漂移的风险随之消失。
+VPS 上不需要 Python / Playwright 环境，只需要 systemd。**浏览器由 `install.sh` 自动装**：
+先看有没有能用的 `google-chrome` / `chromium`（Ubuntu 的 `chromium-browser` 是 snap
+壳子，跑不起来就不算数），没有就依次尝试 `apt-get install chromium`（Debian 才有这个
+包）、官方 Chrome 的 `.deb`（仅 x86_64，依赖由 dpkg 一并装好，之后随 Google 源自动
+更新）、**Chrome for Testing**（x64 / arm64 都有；解到 `/opt/hawkeye/browser` 并软链到
+`/usr/local/bin/google-chrome`，版本号从 Google 官方清单现查）；四级全拿不到只告警不
+阻断。另外需要 `unzip` 或 `python3` 之一（解压部署包与 Chrome for Testing）；
+走源码构建时还需要 `git` 与 Rust 工具链（缺 Rust 会自动装）。
 
 升级时 `install.sh` 会先把旧二进制备份为 `/opt/hawkeye/hawkeye.old` 再替换；
 回滚只需 `sudo mv hawkeye.old hawkeye && sudo systemctl restart hawkeye`。
@@ -519,8 +558,41 @@ cargo test --test browser_smoke -- --ignored --test-threads=1   # 真实浏览�
 cargo fmt --check && cargo clippy             # 格式与静态检查
 ```
 
+安装脚本另有一套 shell 冒烟（在仓库根跑）：
+
+```bash
+bash tests/install_smoke.sh                   # 安装/升级/回滚、配置三态、卸载、浏览器四级自动安装
+shellcheck install.sh tests/install_smoke.sh  # 脚本静态检查
+```
+
+冒烟全程用桩替换 `id` / `systemctl` / `dpkg` / `apt-get` / `curl`，并把 `ROOT`、systemd
+单元、以及所有会被探测的绝对浏览器路径重定向到临时目录——所以**不需要 root、不联网、
+不碰宿主机的 `/usr/bin`、`/usr/local/bin`、`/opt`、`/etc`**；失败时会保留临时目录并把
+路径打出来。
+
 真实浏览器冒烟测试覆盖本地夹具的 CSS/XPath/JS 提取、列表提取与 UA 跨层一致性；
 多个用例共用 chromiumoxide 的默认 profile 目录，必须 `--test-threads=1` 串行跑。
+
+### CI 与发布
+
+`.github/workflows/ci.yml` 在每次 push / PR 上跑：`cargo fmt --check`、
+`cargo clippy --all-targets -- -D warnings`、`cargo test --locked`（ubuntu + macOS
+两套，开发机是 macOS，两边都测才挡得住平台相关回归），外加一个 `install.sh` 冒烟
+任务（shellcheck + `tests/install_smoke.sh`）。真实浏览器冒烟是 `#[ignore]`，
+不在 CI 里跑。
+
+`.github/workflows/release.yml` 由 tag 触发，产出「在服务器上一条命令装」所需的三个资产：
+
+```bash
+# 改完 rust/Cargo.toml 的 version 后
+git tag v0.1.0 && git push origin v0.1.0
+```
+
+标签推上去后，CI 用 cross 构建 `x86_64` 与 `aarch64` 两个静态 musl 二进制（在容器里
+编译，cmake / musl-gcc 都由 cross 镜像提供），连同 `sha256sums.txt` 发成 GitHub Release。
+此后服务器上跑 `install.sh` 走的就是发行版下载（带 sha256 校验），不必再在本机编译
+源码。资产名 `hawkeye-<target-triple>` 与 `sha256sums.txt` 的行格式是 `install.sh`
+下载校验的契约，改名会直接让一键安装失败。
 
 ### 本地开发调试
 
