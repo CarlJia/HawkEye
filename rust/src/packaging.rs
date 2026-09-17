@@ -1,9 +1,13 @@
 //! 部署包构造：把 HawkEye（Rust 版）打成 `dist/hawkeye-<版本>-<时间戳>.zip`。
 //!
 //! 包内容为**Rust 二进制部署**形态：`bin/hawkeye`（release 二进制）、
-//! `config.example.toml`、`install.sh`（远端 systemd 安装脚本）、可选
+//! `config.example.toml`、`install.sh`（项目根的远端安装脚本）、可选
 //! `README.md`。VPS 上不再需要 Python / Playwright 环境，仅需一个
 //! Chromium（install.sh 会探测并尝试安装）。
+//!
+//! `install.sh` 只有一份、就在项目根：它同时是 `curl | sudo sh` 的一键安装入口，
+//! 也是包内被 `hawkeye deploy` 调用的那份。打进包时按文件拷贝，不再内嵌副本，
+//! 免得两份安装脚本各自漂移。
 //!
 //! 泄漏兜底与 Python 版同源：白名单收集出的文件列表与最终 zip 成员名两侧都扫，
 //! 命中七族敏感文件名（大小写不敏感）就中止并不生成 zip（写到临时路径，
@@ -20,105 +24,10 @@ pub struct PackageError(pub String);
 /// config.example.toml 中 telegram.bot_token 的占位值；与 deploy 的硬闸门共用。
 pub const PLACEHOLDER_TOKEN: &str = "123456:ABC-your-bot-token";
 
-/// 远端安装脚本（root 运行；幂等；与 Python 版 deploy.sh 的 install 语义对应）。
-const INSTALL_SH: &str = r##"#!/bin/bash
-# HawkEye Rust 版安装脚本（root 运行；幂等；保留已有 config.toml 与 state.json）
-set -e
-DEST=/opt/hawkeye
-SERVICE=hawkeye.service
-
-install_cmd() {
-    local config_arg="" overwrite=0
-    while [ $# -gt 0 ]; do
-        case "$1" in
-            --config) config_arg="$2"; shift 2 ;;
-            --overwrite-config) overwrite=1; shift ;;
-            *) shift ;;
-        esac
-    done
-
-    SRC_DIR="$(cd "$(dirname "$0")" && pwd)"
-
-    # 1) 目标目录
-    mkdir -p "$DEST"
-
-    # 2) 二进制：旧版备份后替换（回滚用）
-    if [ -f "$DEST/hawkeye" ]; then
-        cp -f "$DEST/hawkeye" "$DEST/hawkeye.old"
-    fi
-    install -m 755 "$SRC_DIR/bin/hawkeye" "$DEST/hawkeye"
-
-    # 3) 配置三态处理
-    if [ -n "$config_arg" ]; then
-        if [ -f "$DEST/config.toml" ] && [ "$overwrite" -eq 0 ]; then
-            cp -f "$config_arg" "$DEST/config.toml.incoming"
-            echo "已保留现有 $DEST/config.toml（新配置存为 config.toml.incoming）"
-        else
-            if [ -f "$DEST/config.toml" ]; then
-                cp -f "$DEST/config.toml" "$DEST/config.toml.bak.$(date +%Y%m%d-%H%M%S)"
-            fi
-            install -m 600 "$config_arg" "$DEST/config.toml"
-        fi
-    fi
-    [ -f "$DEST/config.toml" ] || install -m 600 "$SRC_DIR/config.example.toml" "$DEST/config.toml"
-
-    # 4) Chromium（headless 抓取需要；已装任何一种都跳过；装不上只告警不阻断）
-    if ! command -v chromium >/dev/null 2>&1 \
-       && ! command -v chromium-browser >/dev/null 2>&1 \
-       && ! command -v google-chrome >/dev/null 2>&1 \
-       && ! command -v google-chrome-stable >/dev/null 2>&1; then
-        if command -v apt-get >/dev/null 2>&1; then
-            DEBIAN_FRONTEND=noninteractive apt-get install -y -q chromium \
-              || DEBIAN_FRONTEND=noninteractive apt-get install -y -q chromium-browser \
-              || echo "警告：Chromium 安装失败；守护进程将找不到浏览器而退出"
-        else
-            echo "警告：未检测到 Chromium 且无 apt-get；请手动安装"
-        fi
-    fi
-
-    # 5) systemd 单元（RestartPreventExitStatus=2 与守护进程退出码契约一致）
-    cat > /etc/systemd/system/$SERVICE <<'UNIT'
-[Unit]
-Description=HawkEye 网页元素变更监控
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-Type=simple
-WorkingDirectory=/opt/hawkeye
-ExecStart=/opt/hawkeye/hawkeye -c /opt/hawkeye/config.toml
-Restart=always
-RestartSec=5
-RestartPreventExitStatus=2
-
-[Install]
-WantedBy=multi-user.target
-UNIT
-    systemctl daemon-reload
-    systemctl enable $SERVICE
-
-    # 6) 配置就绪（非占位符）才启动/重启
-    if grep -qF '123456:ABC-your-bot-token' "$DEST/config.toml"; then
-        echo "config.toml 仍是模板，未启动服务；配置后：systemctl start $SERVICE"
-    else
-        systemctl restart $SERVICE
-    fi
-    echo "install 完成：$DEST/hawkeye"
-}
-
-case "${1:-}" in
-    install) shift; install_cmd "$@" ;;
-    *) echo "用法： $0 install [--config <path>] [--overwrite-config]"; exit 2 ;;
-esac
-"##;
-
 // 七族敏感文件名（大小写不敏感）：白名单与 zip 成员名两侧都扫。
 fn is_leaked(leaf: &str) -> bool {
     let lower = leaf.to_lowercase();
-    let prefix_hits = [
-        "config.toml.bak.",
-        "state.json.corrupt.",
-    ];
+    let prefix_hits = ["config.toml.bak.", "state.json.corrupt."];
     lower == "config.toml"
         || lower == "config.toml.tmp"
         || lower == "state.json"
@@ -158,7 +67,8 @@ fn read_version(cargo_toml: &Path) -> Result<String, PackageError> {
         .unwrap_or("");
     if version.is_empty() {
         return Err(PackageError(format!(
-            "{} 的 [package].version 不是非空字符串", cargo_toml.display()
+            "{} 的 [package].version 不是非空字符串",
+            cargo_toml.display()
         )));
     }
     Ok(version.to_string())
@@ -176,6 +86,10 @@ fn check_root(root: &Path) -> Result<(), PackageError> {
     if !root.join("config.example.toml").is_file() {
         missing.push("config.example.toml".to_string());
     }
+    // install.sh 是包内的远端安装入口，缺了就会打出一个装不起来的包。
+    if !root.join("install.sh").is_file() {
+        missing.push("install.sh".to_string());
+    }
     if !missing.is_empty() {
         return Err(PackageError(format!(
             "{} 不是合法的 HawkEye 项目根，缺少：{}。请在项目根目录下运行，或用 --root 指定项目根路径。",
@@ -190,7 +104,8 @@ fn check_root(root: &Path) -> Result<(), PackageError> {
 /// 绕过白名单与七族敏感兜底。
 fn reject_symlinks(dir: &Path) -> Result<(), PackageError> {
     fn walk(dir: &Path) -> Result<(), PackageError> {
-        for entry in std::fs::read_dir(dir).map_err(|e| PackageError(format!("读目录失败：{e}")))? {
+        for entry in std::fs::read_dir(dir).map_err(|e| PackageError(format!("读目录失败：{e}")))?
+        {
             let entry = entry.map_err(|e| PackageError(format!("读目录失败：{e}")))?;
             let path = entry.path();
             if entry.file_type().map(|t| t.is_symlink()).unwrap_or(false) {
@@ -274,16 +189,20 @@ pub fn build_package(
         };
         if !binary_path.is_file() {
             return Err(PackageError(format!(
-                "二进制不存在：{}（测试场景请显式传入）", binary_path.display()
+                "二进制不存在：{}（测试场景请显式传入）",
+                binary_path.display()
             )));
         }
         reject_symlinks(&stage_dir)?;
         std::fs::copy(&binary_path, stage_dir.join("bin").join("hawkeye"))
             .map_err(|e| PackageError(format!("复制二进制失败：{e}")))?;
-        std::fs::copy(root.join("config.example.toml"), stage_dir.join("config.example.toml"))
-            .map_err(|e| PackageError(format!("复制 config.example.toml 失败：{e}")))?;
-        std::fs::write(stage_dir.join("install.sh"), INSTALL_SH)
-            .map_err(|e| PackageError(format!("写 install.sh 失败：{e}")))?;
+        std::fs::copy(
+            root.join("config.example.toml"),
+            stage_dir.join("config.example.toml"),
+        )
+        .map_err(|e| PackageError(format!("复制 config.example.toml 失败：{e}")))?;
+        std::fs::copy(root.join("install.sh"), stage_dir.join("install.sh"))
+            .map_err(|e| PackageError(format!("复制 install.sh 失败：{e}")))?;
         let mut rels = vec![
             "bin/hawkeye".to_string(),
             "config.example.toml".to_string(),
@@ -302,14 +221,18 @@ pub fn build_package(
         // zip 成员名 = <pkg_name>/<rel>；第二道：成员名扫描。
         let members: Vec<String> = rels.iter().map(|rel| format!("{pkg_name}/{rel}")).collect();
         scan_for_leaks(
-            &members.iter().map(|m| m.trim_start_matches(&format!("{pkg_name}/")).to_string()).collect::<Vec<_>>(),
+            &members
+                .iter()
+                .map(|m| m.trim_start_matches(&format!("{pkg_name}/")).to_string())
+                .collect::<Vec<_>>(),
             "zip 成员名",
         )?;
 
         // 写临时 zip，全部通过后再 rename。
         let _ = std::fs::remove_file(&tmp_archive);
         write_zip(&tmp_archive, &members, &stage_dir)?;
-        std::fs::rename(&tmp_archive, &archive).map_err(|e| PackageError(format!("移动 zip 失败：{e}")))?;
+        std::fs::rename(&tmp_archive, &archive)
+            .map_err(|e| PackageError(format!("移动 zip 失败：{e}")))?;
         Ok(archive)
     })();
 
@@ -329,13 +252,15 @@ fn write_zip(tmp_zip: &Path, members: &[String], stage_dir: &Path) -> Result<(),
     for member in members {
         let rel = member.split_once('/').map(|(_, r)| r).unwrap_or(member);
         let abs = stage_dir.join(rel);
-        let data = std::fs::read(&abs).map_err(|e| PackageError(format!("读 {} 失败：{e}", abs.display())))?;
+        let data = std::fs::read(&abs)
+            .map_err(|e| PackageError(format!("读 {} 失败：{e}", abs.display())))?;
         zip.start_file(member.as_str(), options)
             .map_err(|e| PackageError(format!("写 zip 成员 {member} 失败：{e}")))?;
         zip.write_all(&data)
             .map_err(|e| PackageError(format!("写 zip 成员 {member} 失败：{e}")))?;
     }
-    zip.finish().map_err(|e| PackageError(format!("收尾 zip 失败：{e}")))?;
+    zip.finish()
+        .map_err(|e| PackageError(format!("收尾 zip 失败：{e}")))?;
     Ok(())
 }
 
@@ -363,7 +288,9 @@ pub fn print_summary(archive: &Path, pkg_name: &str) {
     println!("  unzip -q /tmp/{pkg_name}.zip -d /tmp && cd /tmp/{pkg_name}");
     println!("  sudo ./install.sh install");
     println!();
-    println!("install 幂等：保留服务器上已有的 config.toml 与 state.json，配置就绪时自动重启服务。");
+    println!(
+        "install 幂等：保留服务器上已有的 config.toml 与 state.json，配置就绪时自动重启服务。"
+    );
     println!("下一步推荐：hawkeye deploy（同一台机器免密 SSH 时直接复用，无需手动 scp）。");
     println!();
 }
