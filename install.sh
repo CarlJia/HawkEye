@@ -473,31 +473,33 @@ service_active() {
 # 服务起不来时，把该单元最近几行日志（脱敏后）打到 stderr。
 #
 # 脱敏是硬要求：reqwest 的错误串会带出 api.telegram.org/bot<token>/… 的完整 URL，直接
-# 回显等于把 token 抄进终端与 CI 日志。保证分两层：config.toml 里那把 token 认得出
-# 就来一次精确替换；形状兜底那道永远要跑，因为配置坏掉（比如缺 [telegram] 段）时
-# config 里抠不出 token，只剩它认得出守护进程自己拼的那个 URL 形态。
+# 回显等于把 token 抄进终端与 CI 日志。分层做法：
+#   ① 形状兜底永远跑（不依赖 config）：Telegram 的 <bot id>:<secret> 两种写法都抹掉，
+#      配置坏掉、抠不出 token 时它是唯一一道；
+#   ② config 里那把 token 认得出、且形状能安全塞进 sed 时，再补一次精确替换。
 #
 # 两条纪律：
-#   ① 绝不能失败。它在回滚之前被调用，set -e 下非零退出会把整个回滚跳过，坏的新
-#      二进制留在盘上而没有任何 die 消息——所以每条命令都带 2>/dev/null 与 || true。
-#   ② 工具自己的报错不能漏出去。sed 的报错会把它正在处理的那段文本引出来（里面
-#      可能正是 token），所以一律静音；读不出东西就少回显几行，不冒泄漏的险。
+#   ① 绝不能失败。它在回滚之前被调用，set -e 下非零退出会把整个回滚跳过、坏的新
+#      二进制留在盘上——所以每条命令都带 2>/dev/null 与 || true。
+#   ② 工具自己的报错不能漏出去。sed 的报错会把正在处理的文本引出来（里面可能
+#      正是 token），所以一律静音。
 journal_tail() {
 	tail_out="$(journalctl -u "$SERVICE" -n "$LOG_TAIL_LINES" --no-pager 2>/dev/null || true)"
 	[ -n "$tail_out" ] || return 0
 	token="$(sed -n 's/^[[:space:]]*bot_token[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' "$CONFIG" 2>/dev/null | head -1)"
+	# 认得出 token 却抹不掉（含 | [ \ 这类正则元字符，塞进 sed 编译不过）时，宁可不
+	# 回显：已知的凭据不该拿「大概不会出现在日志里」去赌。抠不出 token 不在这一列——
+	# 那时没有已知凭据，下面的形状兜底照样跑。
+	case "$token" in
+	*[!0-9A-Za-z_:-]*) return 0 ;;
+	esac
+	# 形状兜底：bot id 与 secret 都要够长，免得把日志里普通的「数字:单词」也误抹。
+	tail_out="$(printf '%s\n' "$tail_out" |
+		sed -E 's|[0-9]{6,}:[A-Za-z0-9_-]{20,}|<REDACTED>|g' 2>/dev/null || true)"
 	if [ -n "$token" ]; then
-		case "$token" in
-		*[!0-9A-Za-z_:-]*)
-			# 抠出来的 bot_token 形状可疑（含 | [ \ 这类正则元字符）：既塞不进 sed
-			# 模式，形状兜底也未必认得出它。宁可一行都不回显，也不拿凭据去赌。
-			return 0
-			;;
-		esac
 		tail_out="$(printf '%s\n' "$tail_out" | sed -E "s|${token}|<REDACTED>|g" 2>/dev/null || true)"
 	fi
-	printf '%s\n' "$tail_out" |
-		sed -E 's|bot[0-9]{6,}:[A-Za-z0-9_-]{6,}|bot<REDACTED>|g' 2>/dev/null || true
+	printf '%s\n' "$tail_out" >&2
 }
 
 install_hawkeye() {
