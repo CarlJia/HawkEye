@@ -1,0 +1,98 @@
+name: Release
+
+# 打一个 v* 标签即发布。产出物与 install.sh 的一键安装路径逐字对齐：
+#   hawkeye-x86_64-unknown-linux-musl
+#   hawkeye-aarch64-unknown-linux-musl
+#   sha256sums.txt
+# install.sh 取 releases/latest/download/<资产名>，并用 sha256sums.txt 里
+# 「<64 位十六进制> + 两空格 + 资产名」的行做校验，所以资产名与格式都不能改。
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: build ${{ matrix.target }}
+    runs-on: ubuntu-latest
+    strategy:
+      # 任一目标失败就整体失败，publish 不会跑：只发一半资产会让对应架构上的
+      # install.sh 拿到 tag 却下载失败，比不发版更难排查。
+      fail-fast: true
+      matrix:
+        target:
+          - x86_64-unknown-linux-musl
+          - aarch64-unknown-linux-musl
+    defaults:
+      run:
+        working-directory: rust
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
+          key: ${{ matrix.target }}
+      # 静态 musl 用 cross 在容器里构建：目标工具链、musl-gcc、cmake 都由 cross
+      # 镜像提供——aws-lc-rs（russh / rustls 的加密后端）会编译 C 代码，
+      # 缺 cmake 直接构建失败。
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cross
+      - run: cross build --release --locked --target ${{ matrix.target }}
+      # 静态链接是 musl 资产的全部意义：install.sh 把它丢到任意发行版上跑，
+      # 动态链接会在 glibc 版本不匹配的机器上直接起不来。
+      # 注意 file 对静态 PIE 报的是 "static-pie linked"，两种写法都算通过。
+      - name: 确认静态链接
+        run: |
+          file "target/${{ matrix.target }}/release/hawkeye"
+          file "target/${{ matrix.target }}/release/hawkeye" \
+            | grep -Eq 'statically linked|static-pie linked' \
+            || { echo "::error::${{ matrix.target }} 不是静态链接"; exit 1; }
+      - name: 收集资产
+        run: |
+          mkdir -p "${{ runner.temp }}/dist"
+          cp "target/${{ matrix.target }}/release/hawkeye" \
+             "${{ runner.temp }}/dist/hawkeye-${{ matrix.target }}"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: hawkeye-${{ matrix.target }}
+          path: ${{ runner.temp }}/dist/hawkeye-${{ matrix.target }}
+          if-no-files-found: error
+
+  publish:
+    name: publish release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
+        with:
+          path: dist
+          merge-multiple: true
+      # 在 dist 里用裸文件名生成，install.sh 是按「资产名」逐字匹配这一行的。
+      - name: 生成 sha256sums.txt
+        working-directory: dist
+        run: sha256sum hawkeye-* > sha256sums.txt && cat sha256sums.txt
+      # 不阻断发布，只提示：标签与 Cargo.toml 版本不一致会让部署包名与发行版对不上。
+      - name: 检查标签与版本一致
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          version="$(sed -n 's/^version = "\(.*\)"/\1/p' rust/Cargo.toml | head -1)"
+          if [ "v$version" != "$TAG" ]; then
+            echo "::warning::标签 $TAG 与 rust/Cargo.toml 的版本 v$version 不一致"
+          fi
+      - name: 发布
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" --generate-notes \
+            dist/hawkeye-* dist/sha256sums.txt
