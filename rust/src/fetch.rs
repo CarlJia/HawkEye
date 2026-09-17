@@ -106,6 +106,45 @@ fn socks5_proxy_server_arg(proxy: &ProxyConfig) -> Option<String> {
     Some(format!("--proxy-server={stripped}"))
 }
 
+/// 当前进程是否以 root 运行（getuid 或 geteuid 为 0）。
+///
+/// 只在 Linux 上有意义：Chromium 的 root 拒绝检查位于 zygote_host_impl_linux.cc，
+/// macOS 以 root 运行不需要（也不应）关沙箱。
+#[cfg(target_os = "linux")]
+fn running_as_root() -> bool {
+    // SAFETY: getuid/geteuid 为只读系统调用，无副作用。
+    unsafe { libc::getuid() == 0 || libc::geteuid() == 0 }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn running_as_root() -> bool {
+    false
+}
+
+/// 组装 Chromium 启动形参（代理走 CLI 形参，其余为工作流固有项）。
+///
+/// `is_root` 为真时补 `--no-sandbox --disable-setuid-sandbox`：Linux 上 zygote 检测到
+/// root 且未关沙箱会直接拒绝启动（stderr 打印 "Running as root without --no-sandbox"，
+/// 进程随即退出，上层只能看到解析 WebSocket URL 时的 unexpected end of stream）。
+/// 服务默认以 root 运行，必须兜住。
+fn base_chromium_args(proxy: Option<&ProxyConfig>, is_root: bool) -> Vec<String> {
+    let mut args = vec![
+        "--headless=new".to_string(),
+        "--disable-blink-features=AutomationControlled".to_string(),
+    ];
+    // SOCKS5 走 Chromium CLI 形参（CDP/Playwright 的 proxy 字段对 SOCKS 不完整生效）。
+    if let Some(proxy) = proxy
+        && let Some(socks_arg) = socks5_proxy_server_arg(proxy)
+    {
+        args.push(socks_arg);
+    }
+    if is_root {
+        args.push("--no-sandbox".to_string());
+        args.push("--disable-setuid-sandbox".to_string());
+    }
+    args
+}
+
 /// 日志里显示代理 server 时剥离 userinfo 段。
 fn redact_proxy_server(server: &str) -> String {
     match server.rsplit_once('@') {
@@ -383,16 +422,11 @@ impl BrowserManager {
     }
 
     pub async fn start(&self) -> Result<(), String> {
-        let mut args: Vec<String> = vec![
-            "--headless=new".to_string(),
-            "--disable-blink-features=AutomationControlled".to_string(),
-        ];
-        // SOCKS5 走 Chromium CLI 形参（CDP/Playwright 的 proxy 字段对 SOCKS 不完整生效）。
-        if let Some(proxy) = &self.proxy
-            && let Some(socks_arg) = socks5_proxy_server_arg(proxy)
-        {
-            args.push(socks_arg);
+        let is_root = running_as_root();
+        if is_root {
+            tracing::warn!("以 root 运行：Chromium 拒绝在未关沙箱时启动，已自动附加 --no-sandbox");
         }
+        let args = base_chromium_args(self.proxy.as_ref(), is_root);
 
         // 优先真 Chrome（等价 channel="chrome"），未装时降级 bundled chromium。
         let exec = detect_chrome_path();
@@ -727,5 +761,33 @@ mod tests {
             Some("Android")
         );
         assert_eq!(platform_from_ua("curl/8.0"), None);
+    }
+
+    #[test]
+    fn test_root_disables_chromium_sandbox() {
+        let root = base_chromium_args(None, true);
+        assert!(
+            root.contains(&"--no-sandbox".to_string()),
+            "root 启动必须带 --no-sandbox，否则 Chromium 的 zygote 拒绝启动"
+        );
+        assert!(root.contains(&"--disable-setuid-sandbox".to_string()));
+
+        let user = base_chromium_args(None, false);
+        assert!(
+            !user.iter().any(|a| a.contains("sandbox")),
+            "非 root 应保留沙箱，不能无条件关沙箱"
+        );
+    }
+
+    #[test]
+    fn test_base_args_keeps_socks_proxy_without_userinfo() {
+        let proxy = ProxyConfig {
+            server: "socks5://user:pass@1.2.3.4:1080".to_string(),
+            username: None,
+            password: None,
+            bypass: None,
+        };
+        let args = base_chromium_args(Some(&proxy), false);
+        assert!(args.contains(&"--proxy-server=socks5://1.2.3.4:1080".to_string()));
     }
 }
