@@ -589,8 +589,10 @@ shellcheck install.sh tests/install_smoke.sh  # 脚本静态检查
 `.github/workflows/release.yml` 由 tag 触发，产出「在服务器上一条命令装」所需的三个资产：
 
 ```bash
-# 改完 rust/Cargo.toml 的 version 后
-git tag v0.1.0 && git push origin v0.1.0
+# 改完 rust/Cargo.toml 的 version 后。标签必须与它一致：workflow 会对不一致告警，
+# 部署包名也取自这个版本，所以从 Cargo.toml 取，别手写死（写死迟早忘了改）。
+VERSION="$(sed -n 's/^version = "\(.*\)"/\1/p' rust/Cargo.toml | head -1)"
+git tag "v$VERSION" && git push origin "v$VERSION"
 ```
 
 标签推上去后，CI 用 cross 构建 `x86_64` 与 `aarch64` 两个静态 musl 二进制（在容器里

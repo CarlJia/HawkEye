@@ -37,6 +37,13 @@ BROWSER_DIR="$ROOT/browser"
 CFT_INDEX="https://googlechromelabs.github.io/chrome-for-testing/last-known-good-versions-with-downloads.json"
 # 官方 Chrome 的 .deb（只有 x86_64）：依赖由 dpkg 一并装好，之后随 Google 源自动更新。
 CHROME_DEB="https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb"
+# 服务起不来时回显多少行它自己的日志：原因（配置错误 / 凭据被拒 / 浏览器起不来）就在
+# 那几行里，只丢一句 journalctl 命令让人自己去翻太费事。
+LOG_TAIL_LINES=12
+# 配置错误或 Telegram 凭据不可用的退出码（rust/src/main.rs 的 DaemonError::Config /
+# ::Telegram）。单元文件用它让 systemd 停在 failed（重启救不回来），安装器用它把这类
+# 失败从「新版本起不来」里分出来——两处必须同源，改一处漏一处会让提示说反。
+FATAL_EXIT_STATUS=2
 BROWSER_PATH=""
 APT_UPDATED=""
 STAGED_CONFIG=""
@@ -436,8 +443,8 @@ ExecStart=/opt/hawkeye/hawkeye -c /opt/hawkeye/config.toml
 Restart=always
 RestartSec=5
 # 退出码 2 是配置错误或 Telegram 凭据/chat_id 不可用：重启无用，停在 failed
-# 等人工修配置，避免空转重启循环。
-RestartPreventExitStatus=2
+# 等人工修配置，避免空转重启循环。安装器按同一个常量解释这个退出码。
+RestartPreventExitStatus=${FATAL_EXIT_STATUS}
 
 [Install]
 WantedBy=multi-user.target
@@ -464,6 +471,44 @@ print_summary() {
 	field "状态" "systemctl status $SERVICE"
 	field "日志" "journalctl -u $SERVICE -f"
 	printf '\n'
+}
+
+# is-active 答得比「立刻退出的进程」还早，等一拍再问。成功与否就是 systemd 的答案。
+service_active() {
+	sleep 3
+	systemctl is-active --quiet "$SERVICE"
+}
+
+# 服务起不来时，把该单元最近几行日志（脱敏后）打到 stderr。
+#
+# 脱敏是硬要求：reqwest 的错误串会带出 api.telegram.org/bot<token>/… 的完整 URL，直接
+# 回显等于把 token 抄进终端与 CI 日志。分层做法：
+#   ① 形状兜底永远跑（不依赖 config）：Telegram 的 <bot id>:<secret> 两种写法都抹掉，
+#      配置坏掉、抠不出 token 时它是唯一一道；
+#   ② config 里那把 token 认得出、且形状能安全塞进 sed 时，再补一次精确替换。
+#
+# 两条纪律：
+#   ① 绝不能失败。它在回滚之前被调用，set -e 下非零退出会把整个回滚跳过、坏的新
+#      二进制留在盘上——所以每条命令都带 2>/dev/null 与 || true。
+#   ② 工具自己的报错不能漏出去。sed 的报错会把正在处理的文本引出来（里面可能
+#      正是 token），所以一律静音。
+journal_tail() {
+	tail_out="$(journalctl -u "$SERVICE" -n "$LOG_TAIL_LINES" --no-pager 2>/dev/null || true)"
+	[ -n "$tail_out" ] || return 0
+	token="$(sed -n 's/^[[:space:]]*bot_token[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' "$CONFIG" 2>/dev/null | head -1)"
+	# 认得出 token 却抹不掉（含 | [ \ 这类正则元字符，塞进 sed 编译不过）时，宁可不
+	# 回显：已知的凭据不该拿「大概不会出现在日志里」去赌。抠不出 token 不在这一列——
+	# 那时没有已知凭据，下面的形状兜底照样跑。
+	case "$token" in
+	*[!0-9A-Za-z_:-]*) return 0 ;;
+	esac
+	# 形状兜底：bot id 与 secret 都要够长，免得把日志里普通的「数字:单词」也误抹。
+	tail_out="$(printf '%s\n' "$tail_out" |
+		sed -E 's|[0-9]{6,}:[A-Za-z0-9_-]{20,}|<REDACTED>|g' 2>/dev/null || true)"
+	if [ -n "$token" ]; then
+		tail_out="$(printf '%s\n' "$tail_out" | sed -E "s|${token}|<REDACTED>|g" 2>/dev/null || true)"
+	fi
+	printf '%s\n' "$tail_out" >&2
 }
 
 install_hawkeye() {
@@ -504,16 +549,36 @@ install_hawkeye() {
 		# 不交给 set -e：起不来的二进制会让 restart 失败，而这正是下面回滚
 		# 存在的理由。放任 set -e，脚本会在这里带着 systemd 的原始报错退出。
 		systemctl restart "$SERVICE" || true
-		# is-active 答得比「立刻退出的进程」还早，等一拍再问。
-		sleep 3
-		if ! systemctl is-active --quiet "$SERVICE"; then
+		if ! service_active; then
+			# 原因在守护进程自己的日志里，先把它（脱敏后）摆出来。
+			journal_tail
+			# 退出码 2 是配置或凭据的致命错误（main.rs 的 DaemonError::Config /
+			# ::Telegram）。RestartPreventExitStatus=2 让它停在 failed、重启救不回来，
+			# 而且这时候二进制明明跑起来了（参数解析、日志初始化都过了）——不能报成
+			# 「新版本没能启动」，那会把排查方向整个带偏。
+			# 不用 --value：它要 systemd ≥ 230，老发行版上拿不到值会静默退回旧措辞；
+			# 自己剥前缀各版本一致。真读不到就留空，上面的日志仍然摆着原因。
+			main_status="$(systemctl show -p ExecMainStatus "$SERVICE" 2>/dev/null |
+				sed -n 's/^ExecMainStatus=//p')"
+			if [ "$main_status" = "$FATAL_EXIT_STATUS" ]; then
+				reason="服务没能启动：${CONFIG} 的配置或 Telegram 凭据有问题（退出码 2，重启无用，与新版本无关）"
+			elif [ -n "$backup" ]; then
+				reason="新版本没能启动"
+			else
+				# 首次安装没有上一版，谈不上「新版本没起来」。
+				reason="服务启动失败"
+			fi
 			if [ -n "$backup" ]; then
 				install -m 755 "$backup" "$BIN"
 				rm -f "$backup"
 				systemctl restart "$SERVICE" 2>/dev/null || true
-				die "新版本没能启动，已回滚到上一版。日志：journalctl -u $SERVICE -n 50"
+				# 回滚也要复验：旧配置坏着的时候上一版同样起不来，不能报成回滚成功。
+				if service_active; then
+					die "${reason}，已回滚到上一版。日志：journalctl -u $SERVICE -n 50"
+				fi
+				die "${reason}；已回滚到上一版但服务仍未起来——先按上面的日志修 ${CONFIG}，再 systemctl start $SERVICE"
 			fi
-			die "服务启动失败。日志：journalctl -u $SERVICE -n 50"
+			die "${reason}。日志：journalctl -u $SERVICE -n 50"
 		fi
 		rm -f "$BIN.old"
 		ok "服务" "已启动并开机自启"
