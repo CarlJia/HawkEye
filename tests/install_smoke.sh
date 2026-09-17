@@ -239,6 +239,29 @@ hasnt "第二次不再下载" "Chrome for Testing" "$CASE/out2"
 run k --uninstall --yes >"$CASE/out3" 2>&1; check "卸载退出码" "$?" "0"
 absent "$LOCALBIN/google-chrome" "卸载摘掉软链"
 
+section "L. 显式 --ref：跳过部署包，强制源码构建"
+setup l
+# git/cargo 桩：让 build_from_source 在离线环境里跑完，产出可识别的二进制。
+# setup 造脚本时会在旁边放 bin/hawkeye（部署包形态），本用例就是验证 --ref 让它让位。
+cat > "$FFAKE/git" <<EOF
+#!/bin/sh
+for last in "\$@"; do :; done
+mkdir -p "\${last}/rust"
+printf 'x\n' > "\${last}/rust/Cargo.toml"
+cp "$REPO_ROOT/config.example.toml" "\${last}/config.example.toml"
+EOF
+cat > "$FFAKE/cargo" <<'EOF'
+#!/bin/sh
+mkdir -p target/release
+printf '#!/bin/sh\necho SRC-BINARY\n' > target/release/hawkeye
+chmod +x target/release/hawkeye
+EOF
+chmod +x "$FFAKE/git" "$FFAKE/cargo"
+run l install --ref some-branch >"$CASE/out" 2>&1; check "退出码" "$?" "0"
+has "来源是源码构建" "源码构建" "$CASE/out"
+has "装的是源码构建产物" "SRC-BINARY" "$CASE/root/hawkeye"
+hasnt "没用旁边的部署包二进制" "NEW-BINARY" "$CASE/root/hawkeye"
+
 printf '\n'
 if [ "$FAILED" -eq 0 ]; then echo "全部通过"; else echo "有失败项"; fi
 exit "$FAILED"

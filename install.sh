@@ -17,6 +17,9 @@ set -eu
 
 REPO="CarlJia/HawkEye"
 REF="main"
+# 用户是否显式给了 --ref。显式给定时强制源码构建：否则发行版路径会把 --ref
+# 静默忽略（装到的不是你要的 ref，且没有任何提示）。
+REF_EXPLICIT=0
 SERVICE="hawkeye.service"
 UNIT="/etc/systemd/system/hawkeye.service"
 # 二进制、配置、state.json 全在 /opt/hawkeye 下：一个路径备份、迁移，也把
@@ -93,6 +96,12 @@ press() {
 # ---- 载荷来源 ----
 # 后三个变量由 resolve_payload 填出：SRC_BIN 必填，SRC_EXAMPLE 可缺（缺了就不播种模板）。
 resolve_payload() {
+	# 显式 --ref：跳过部署包与发行版两条快捷路径，直接按该 ref 源码构建。
+	# 否则发行版存在时 --ref 被静默忽略，装到的不是用户要的分支。
+	if [ "$REF_EXPLICIT" = 1 ]; then
+		build_from_source
+		return 0
+	fi
 	# 1) 部署包：脚本旁边带着二进制，直接用它，不联网。
 	if [ -f "$SCRIPT_DIR/bin/hawkeye" ]; then
 		SRC_BIN="$SCRIPT_DIR/bin/hawkeye"
@@ -586,13 +595,14 @@ HawkEye 安装器（Debian / Ubuntu）
                        --overwrite-config 时，现有那份保留、新配置存为 .incoming
   --overwrite-config   用 --config 顶掉服务器上已有的 config.toml（先备份）
   --repo <owner/repo>  GitHub 仓库，默认 $REPO
-  --ref <分支/标签>    源码构建用的 git ref，默认 $REF
+  --ref <分支/标签>    源码构建用的 git ref，默认 $REF。显式指定时强制源码构建，
+                       跳过部署包与发行版两条快捷路径
   --yes, -y            跳过确认
   --help, -h           显示这段
 
 脚本旁边若有 bin/hawkeye 就直接用它（部署包形态）；否则先找 GitHub 发行版
-（下载 + sha256 校验），查不到再在服务器上编译源码（缺 Rust 时自动装 rustup，
-Rust 版还没并进默认分支时用 --ref <分支> 指定）。
+（下载 + sha256 校验），查不到再在服务器上编译源码（缺 Rust 时自动装 rustup）。
+显式 --ref <分支/标签> 会跳过前两条，直接按该 ref 源码构建。
 
 二进制、配置与 state.json 都在 ${ROOT}。卸载默认保留配置与状态。
 TXT
@@ -608,7 +618,7 @@ while [ $# -gt 0 ]; do
 	--config) [ $# -ge 2 ] || die "--config 后面要跟路径"; STAGED_CONFIG="$2"; shift 2 ;;
 	--overwrite-config) OVERWRITE=1; shift ;;
 	--repo) [ $# -ge 2 ] || die "--repo 后面要跟 owner/repo"; REPO="$2"; shift 2 ;;
-	--ref) [ $# -ge 2 ] || die "--ref 后面要跟分支或标签"; REF="$2"; shift 2 ;;
+	--ref) [ $# -ge 2 ] || die "--ref 后面要跟分支或标签"; REF="$2"; REF_EXPLICIT=1; shift 2 ;;
 	--purge) ACTION=uninstall; PURGE=1; shift ;;
 	--yes | -y) YES=1; shift ;;
 	-h | --help) usage; exit 0 ;;
